@@ -74,7 +74,7 @@ Edit `.mcp.json` in your project root:
   "mcpServers": {
     "ds": {
       "command": "python",
-      "args": ["/path/to/08_datasheetMCP/mcp/server.py"]
+      "args": ["/path/to/datasheet-mcp/mcp/server.py"]
     }
   }
 }
@@ -98,7 +98,7 @@ Edit `claude_desktop_config.json` (Settings → Developer → Edit Config):
   "mcpServers": {
     "ds": {
       "command": "python",
-      "args": ["/path/to/08_datasheetMCP/mcp/server.py"]
+      "args": ["/path/to/datasheet-mcp/mcp/server.py"]
     }
   }
 }
@@ -117,7 +117,7 @@ Paste into the MCP settings UI or `cline_mcp_settings.json`:
   "mcpServers": {
     "ds": {
       "command": "python",
-      "args": ["/path/to/08_datasheetMCP/mcp/server.py"]
+      "args": ["/path/to/datasheet-mcp/mcp/server.py"]
     }
   }
 }
@@ -180,7 +180,7 @@ flowchart LR
 
 ```bash
 git clone https://github.com/hungnguyen1503/datasheet-mcp.git
-cd 08_datasheetMCP
+cd datasheet-mcp
 pip install -r mcp/requirements.txt
 pip install InquirerPy          # optional — adds fuzzy TUI selector
 ```
@@ -260,7 +260,7 @@ build.bat --part ADXL345 --reset
 ### Step 3 — Verify
 
 ```bash
-cd 08_datasheetMCP
+cd datasheet-mcp
 
 python -m pytest tests/ -q                  # 160 unit tests, ~0.4 s
 python mcp/server.py                         # server starts — Ctrl+C to stop
@@ -295,7 +295,7 @@ table's column headers did not match the heuristic patterns.
 **♻️ Re-index a part after editing extraction:**
 
 ```bash
-cd 08_datasheetMCP
+cd datasheet-mcp
 python tools/extract_structured.py --part ADXL345 --reset
 cd mcp && build.bat --part ADXL345 --reset
 ```
@@ -303,14 +303,14 @@ cd mcp && build.bat --part ADXL345 --reset
 **🧪 Run the tests:**
 
 ```bash
-cd 08_datasheetMCP
+cd datasheet-mcp
 python -m pytest tests/ -v
 ```
 
 **🗑️ Remove a part entirely:**
 
 ```bash
-cd 08_datasheetMCP/mcp
+cd datasheet-mcp/mcp
 python -c "from ds.db import get_db; db=get_db(); [db.open_table(t).delete(\"part='ADXL345'\") for t in db.list_tables()]"
 ```
 
@@ -321,7 +321,7 @@ python -c "from ds.db import get_db; db=get_db(); [db.open_table(t).delete(\"par
 Copy `mcp/.env.example` to `mcp/.env` and adjust as needed.
 
 ```bash
-cd 08_datasheetMCP
+cd datasheet-mcp
 cp mcp/.env.example mcp/.env
 ```
 
@@ -382,7 +382,7 @@ HUM-style static bearer-token auth — only needed when `DS_TRANSPORT=streamable
 ## 📁 Project structure
 
 ```
-08_datasheetMCP/
+datasheet-mcp/
 ├── .mcp.json                  ← Claude Code MCP registration
 ├── mcp/
 │   ├── server.py              ← MCP server entrypoint
