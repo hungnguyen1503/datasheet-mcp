@@ -134,7 +134,7 @@ def run_pipeline(
     if no_extract and regs_path.exists():
         print(f"  Stage 2: skipped (--no-extract, using cached {regs_path.name})")
     else:
-        print(f"  Stage 2: LLM extraction…")
+        print(f"  Stage 2: heuristic table extraction…")
         from ds.ingest.extract import extract_structured
         extract_structured(part)
 

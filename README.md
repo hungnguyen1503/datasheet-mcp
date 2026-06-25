@@ -31,7 +31,7 @@ flowchart TD
         GPU{"CUDA\navailable?"}
         S1H["MinerU hybrid-engine\n(VLM table understanding)"]
         S1P["MinerU pipeline\n(text-only, fast on CPU)"]
-        S2["Stage 2 — Markdown → JSON\ntools/extract_structured.py\nLLM extracts registers / pins"]
+        S2["Stage 2 — Markdown → JSON\ntools/extract_structured.py\nheuristic table parser"]
         S3["Stage 3 — JSON → LanceDB\nmcp/build.bat\nembed + vector + FTS index"]
     end
 
@@ -106,8 +106,9 @@ flowchart LR
 | Python ≥ 3.11 | Runtime | 3.12 recommended |
 | `pip install -r mcp/requirements.txt` | All Python deps (LanceDB, FastMCP, …) | See `mcp/requirements.txt` |
 | [MinerU](https://github.com/opendatalab/MinerU) — `pip install mineru` | Stage 1 PDF extraction (best quality) | **Optional** — PyMuPDF fallback included |
-| LMStudio, Ollama, or OpenAI | Stage 2 LLM extraction | Load any instruction model (e.g. `qwen3:14b`) |
 | `pip install InquirerPy` | Fuzzy TUI multi-select | **Optional** — numbered menu fallback included |
+
+> **No LLM required.** Stage 2 uses a heuristic markdown-table parser — no LMStudio, Ollama, or API key needed.
 
 ---
 
@@ -120,12 +121,8 @@ cd 08_datasheetMCP
 # 2. Install Python dependencies
 pip install -r mcp/requirements.txt
 
-# 3. Copy and edit configuration
+# 3. Copy config (no LLM settings needed — Stage 2 uses heuristic parsing)
 cp mcp/.env.example mcp/.env
-# Open mcp/.env and set:
-#   EXTRACT_LLM_BACKEND = lmstudio | ollama | openai
-#   EXTRACT_LLM_HOST    = http://localhost:1234/v1   (LMStudio default)
-#   EXTRACT_LLM_MODEL   = qwen3:14b                  (or your model)
 
 # 4. (Optional) faster fuzzy PDF selection
 pip install InquirerPy
@@ -196,7 +193,7 @@ sequenceDiagram
     participant U as You
     participant I as tools/ingest.py
     participant M as MinerU / PyMuPDF
-    participant L as LLM (LMStudio / Ollama)
+    participant P as Heuristic Parser
     participant DB as LanceDB
 
     U->>I: python tools/ingest.py --dir /pdfs
@@ -209,9 +206,9 @@ sequenceDiagram
     I->>M: extract markdown from PDF
     M-->>I: data/ADXL345/MD/01_Features/…  data/ADXL345/MD/02_Register_Map/…
 
-    Note over I,L: Stage 2 — LLM reads each section's tables
-    I->>L: extract register / pin / catalog tables
-    L-->>I: registers.json  pins.json  catalog.json
+    Note over I,P: Stage 2 — column-header pattern matching (no LLM, instant)
+    I->>P: parse register / pin tables from markdown
+    P-->>I: registers.json  pins.json  catalog.json
 
     Note over I,DB: Stage 3 — embed + index locally
     I->>DB: embed text, build vector + FTS indexes
@@ -230,7 +227,7 @@ sequenceDiagram
 python tools/pdf_to_md.py --pdf /downloads/ADXL345.pdf
 # Creates: data/ADXL345/source.pdf  +  data/ADXL345/MD/NN_Section/…
 
-# Stage 2: LLM extraction (fully resumable — cached per section)
+# Stage 2: heuristic table extraction (no LLM — instant, deterministic)
 python tools/extract_structured.py --part ADXL345
 # Creates: data/ADXL345/registers.json  pins.json  catalog.json
 #          data/ADXL345/.extract_cache.json  (resume cache)

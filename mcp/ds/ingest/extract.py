@@ -1,28 +1,25 @@
-"""LLM-assisted structured extraction from MinerU markdown.
+"""Heuristic structured extraction from MinerU markdown — no LLM required.
 
-Scans each section markdown for register-map tables, bit-field tables, and pin
-tables. Sends each candidate table (plus surrounding prose context) to an
-OpenAI-compatible LLM and normalises the response into RegisterCard / BitField /
-Pin JSON.
+Scans each section's markdown for register-map tables, bit-field tables, and
+pin tables. Uses column-header pattern matching to classify and parse tables
+into RegisterCard / BitField / Pin objects deterministically.
 
-Results are cached per-section in data/<part>/.extract_cache.json (same
-caching idiom as SchematicMCP's caption_tiles.py) so the pass is fully
-resumable.
+Strategy
+--------
+1. Split markdown into table blocks (header + separator + rows).
+2. Score each column header against known register / pin / bitfield patterns.
+3. If confidence is sufficient → parse into structured objects.
+4. Low-confidence tables are silently skipped (they remain in the prose index).
 
-LLM backend: any OpenAI-compatible endpoint.  Configure via mcp/.env:
-  EXTRACT_LLM_BACKEND=lmstudio   # or ollama, openai
-  EXTRACT_LLM_HOST=http://localhost:1234/v1
-  EXTRACT_LLM_MODEL=qwen3:14b    # or any instruction-following model
-  EXTRACT_LLM_KEY=lm-studio      # set to real key for openai
-  EXTRACT_WORKERS=4              # parallel section workers
+No LLM, no network, no API keys. Runs in under a second per part.
 """
 
 from __future__ import annotations
 
 import json
-import os
 import re
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import uuid
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -32,238 +29,335 @@ from ..catalog import (
 )
 from ..model import RegisterCard, BitField, Pin, PartMeta
 
-# ── LLM client ────────────────────────────────────────────────────────────────
+# ── Markdown table parsing ────────────────────────────────────────────────────
 
-_BACKEND_DEFAULTS = {
-    "lmstudio": ("http://localhost:1234/v1", "lm-studio"),
-    "ollama":   ("http://localhost:11434/v1", "ollama"),
-    "openai":   ("https://api.openai.com/v1", ""),
-}
-_DEFAULT_MODEL = {
-    "lmstudio": "qwen3:14b",
-    "ollama":   "qwen3:14b",
-    "openai":   "gpt-4o-mini",
-}
+_TABLE_RE = re.compile(
+    r"(?P<header>\|.+\|\n)\|[-|: ]+\|\n(?P<rows>(?:\|.+\|\n?)+)",
+    re.MULTILINE,
+)
 
-
-def _llm_client():
-    from openai import OpenAI
-    backend = os.environ.get("EXTRACT_LLM_BACKEND", "lmstudio")
-    default_url, default_key = _BACKEND_DEFAULTS.get(backend, _BACKEND_DEFAULTS["lmstudio"])
-    host = os.environ.get("EXTRACT_LLM_HOST", default_url)
-    key = os.environ.get("EXTRACT_LLM_KEY", default_key)
-    model = os.environ.get("EXTRACT_LLM_MODEL", _DEFAULT_MODEL.get(backend, "qwen3:14b"))
-    return OpenAI(base_url=host, api_key=key or "none"), model
+_HEADING_RE = re.compile(r"^#{1,6}\s+(.+?)\s*#*\s*$", re.MULTILINE)
+# Pattern that often precedes a register description: "Register: NAME (0xNN)"
+_REG_ADDR_RE = re.compile(
+    r"(?:register[:\s]+)?([A-Z][A-Z0-9_]{1,20})\s*\(?\s*(0[xX][0-9A-Fa-f]{1,4})\s*\)?",
+    re.IGNORECASE,
+)
 
 
-# ── Heuristic table detector ──────────────────────────────────────────────────
-
-_TABLE_RE = re.compile(r"(\|.+\|\n(?:\|[-: |]+\|\n)(?:\|.+\|\n)+)", re.MULTILINE)
-# Detect address-like patterns that suggest a register-map table context
-_ADDR_RE = re.compile(r"0x[0-9A-Fa-f]{2,4}|address|register|bit\s*\d+|d7|b7", re.IGNORECASE)
-_PIN_RE = re.compile(r"\bpin\b|\bpad\b|\bpackage\b|\bsda\b|\bscl\b|\bvdd\b|\bgnd\b", re.IGNORECASE)
+def _split_row(row: str) -> list[str]:
+    """Split a markdown table row into cells, stripping leading/trailing pipes."""
+    return [c.strip() for c in row.strip().strip("|").split("|")]
 
 
-def _extract_tables(md_text: str) -> list[dict]:
-    """Find markdown tables and classify them as register/pin/other."""
-    tables = []
-    for m in _TABLE_RE.finditer(md_text):
-        tbl = m.group(0)
-        # grab up to 200 chars of context before the table
-        start = max(0, m.start() - 200)
-        ctx = md_text[start:m.start()]
-        is_reg = bool(_ADDR_RE.search(tbl) or _ADDR_RE.search(ctx))
-        is_pin = bool(_PIN_RE.search(tbl) or _PIN_RE.search(ctx))
-        tables.append({"text": tbl, "ctx": ctx.strip(), "is_reg": is_reg, "is_pin": is_pin})
-    return tables
+def _col_role(header: str) -> str:
+    """Return the semantic role of a column header string."""
+    h = header.lower().strip()
+    # Bit position / register bit columns
+    if re.search(r"\bd[0-7]\b|bit\s*(no\.?|pos\.?|#|num\.?|position)?$|^bits?$", h):
+        return "bits"
+    # Register / bit symbol / name
+    if re.search(r"^symbol$|mnemonic|field\s*name|bit\s*name|reg.*name|^name$", h):
+        return "symbol"
+    # Address / offset
+    if re.search(r"address|addr|offset|hex|^0x", h):
+        return "address"
+    # Description
+    if re.search(r"descr|function|detail|comment|note|value", h):
+        return "desc"
+    # Access / R/W
+    if re.search(r"^r/?w$|^access$|^type$|^mode$|read.*write|r\s*/\s*w", h):
+        return "access"
+    # Default / reset value
+    if re.search(r"default|reset|por|init|power.on", h):
+        return "default"
+    # Pin number / identifier
+    if re.search(r"^pin\s*(no\.?|#|num\.?)?$|^pad\s*(no\.?)?$|^number$|^no\.$", h):
+        return "pin"
+    # Pin signal name
+    if re.search(r"^signal$|pin\s*name|^mnemonic$|^function$", h):
+        return "signal"
+    # Direction / I/O type
+    if re.search(r"direction|^i\s*/?\s*o$|^input$|^output$|^i\/o\s*type$", h):
+        return "iotype"
+    return "unknown"
 
 
-# ── LLM prompts ───────────────────────────────────────────────────────────────
+def _classify_table(headers: list[str]) -> tuple[str, dict[str, int]]:
+    """Classify a table as 'register_map', 'bitfield', 'pin', or 'other'.
 
-_REGISTER_SYSTEM = """\
-You are a datasheet parser. Extract register definitions from the markdown table(s) below.
-For each register, produce one JSON object with these fields:
-  register  : symbol in SCREAMING_SNAKE_CASE or the original symbol (e.g. "POWER_CTL", "BW_RATE")
-  name      : full register name (string)
-  section   : address or section number if visible (string, e.g. "0x2D", "")
-  addresses : list of [label, address] pairs — e.g. [["", "0x2D"]] — empty list if unknown
-  bitfields : list of bit field objects with keys:
-                bits (e.g. "D7", "D7-D5", "7:5"), symbol (screaming snake or "—"),
-                name (string), description (string), access (e.g. "R/W", "R", "W")
-  notes     : any trailing notes as a single string (or "")
+    Returns (classification, {role: col_index}).
+    """
+    roles: dict[str, int] = {}
+    for i, h in enumerate(headers):
+        r = _col_role(h)
+        if r != "unknown" and r not in roles:
+            roles[r] = i
 
-Return a JSON array of register objects. If no registers are found return [].
-Do NOT add markdown fences. Return raw JSON only."""
+    has_bits    = "bits"    in roles
+    has_symbol  = "symbol"  in roles
+    has_desc    = "desc"    in roles
+    has_access  = "access"  in roles
+    has_address = "address" in roles
+    has_pin     = "pin"     in roles
+    has_signal  = "signal"  in roles
+    has_iotype  = "iotype"  in roles
 
-_PIN_SYSTEM = """\
-You are a datasheet parser. Extract pin/pad descriptions from the markdown table(s) below.
-For each pin, produce one JSON object:
-  pin         : pin number or identifier (string, e.g. "1", "A3", "VS")
-  signal      : signal/pad name (e.g. "SDA", "SCL", "VDD I/O", "CS")
-  type        : direction/kind (e.g. "I", "O", "I/O", "Power", "GND", "")
-  description : short functional description (string)
-  block       : if this pin belongs to a named interface/block write it (e.g. "SERIAL"), else ""
+    # Bit-field table: bits column + (symbol or desc)
+    if has_bits and (has_symbol or has_desc or has_access):
+        return "bitfield", roles
 
-Return a JSON array of pin objects. If no pins found return [].
-Return raw JSON only."""
+    # Register map table: address + name/symbol (no individual bit columns)
+    if has_address and (has_symbol or has_desc):
+        return "register_map", roles
 
-_CATALOG_SYSTEM = """\
-You are a datasheet parser. Read the text below and return ONE JSON object:
-  vendor  : manufacturer name (string, e.g. "Analog Devices")
-  title   : product description / datasheet title (string, e.g. "3-Axis Digital Accelerometer")
-  revision: revision string if visible (string, e.g. "Rev.E", "")
+    # Pin table: pin number + (signal or desc)
+    if has_pin and (has_signal or has_desc or has_iotype):
+        return "pin", roles
 
-Return raw JSON only."""
+    # Looser pin detection: signal + direction columns
+    if has_signal and (has_iotype or has_desc):
+        return "pin", roles
 
-
-def _call_llm(client, model: str, system: str, user_text: str, max_tokens: int = 2048) -> str:
-    resp = client.chat.completions.create(
-        model=model,
-        max_tokens=max_tokens,
-        temperature=0,
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": user_text[:8000]},  # safety truncation
-        ],
-    )
-    return (resp.choices[0].message.content or "").strip()
+    return "other", roles
 
 
-def _parse_json(text: str) -> Any:
-    # strip markdown fences if model added them despite instructions
-    text = re.sub(r"^```[a-z]*\n?", "", text.strip())
-    text = re.sub(r"\n?```$", "", text.strip())
-    return json.loads(text)
+# ── Context extraction ────────────────────────────────────────────────────────
+
+def _context_before(text: str, match_start: int, chars: int = 300) -> str:
+    """Return up to `chars` characters of text immediately before a match."""
+    return text[max(0, match_start - chars): match_start]
+
+
+def _nearest_heading(context: str) -> str:
+    """Return the last heading found in a context string."""
+    headings = _HEADING_RE.findall(context)
+    return headings[-1].strip() if headings else ""
+
+
+def _extract_register_name_address(context: str) -> tuple[str, str]:
+    """Try to extract a register name and hex address from context text."""
+    m = _REG_ADDR_RE.search(context)
+    if m:
+        return m.group(1).upper(), m.group(2).upper()
+    # Try just a hex address pattern in a heading
+    addr_m = re.search(r"(0[xX][0-9A-Fa-f]{1,4})", context)
+    addr = addr_m.group(1).upper() if addr_m else ""
+    # Try to get a register symbol from the heading (ALLCAPS word)
+    sym_m = re.search(r"\b([A-Z][A-Z0-9_]{2,})\b", context)
+    sym = sym_m.group(1) if sym_m else ""
+    return sym, addr
+
+
+# ── Table parsers ─────────────────────────────────────────────────────────────
+
+def _parse_register_map(
+    rows: list[list[str]],
+    col_map: dict[str, int],
+    block: str,
+    part: str,
+    vendor: str,
+    context: str,
+) -> list[RegisterCard]:
+    """Parse a register-map table into RegisterCard objects (no bitfields)."""
+    cards: list[RegisterCard] = []
+    col_sym  = col_map.get("symbol", col_map.get("desc",   -1))
+    col_addr = col_map.get("address", -1)
+    col_desc = col_map.get("desc",  col_map.get("symbol",  -1))
+    col_acc  = col_map.get("access", -1)
+
+    def _cell(row, idx):
+        return row[idx].strip() if 0 <= idx < len(row) else ""
+
+    for row in rows:
+        sym  = _cell(row, col_sym).upper()
+        addr = _cell(row, col_addr).upper()
+        desc = _cell(row, col_desc)
+        if not sym or sym in ("—", "-", "RESERVED", "NAME", "REGISTER"):
+            continue
+        # Skip header-repeat rows
+        if sym.lower() in ("name", "symbol", "register", "mnemonic"):
+            continue
+        addresses = [("", addr)] if addr else []
+        cards.append(RegisterCard(
+            vendor=vendor, part=part, block=block,
+            register=sym, name=desc or sym, section="",
+            addresses=addresses, bitfields=[], notes="",
+        ))
+    return cards
+
+
+def _parse_bitfield_table(
+    rows: list[list[str]],
+    col_map: dict[str, int],
+    register: str,
+    block: str,
+    part: str,
+    vendor: str,
+) -> list[BitField]:
+    """Parse a bit-field table into BitField objects."""
+    fields: list[BitField] = []
+    col_bits   = col_map.get("bits",   -1)
+    col_sym    = col_map.get("symbol", col_map.get("desc",   -1))
+    col_desc   = col_map.get("desc",   col_map.get("symbol", -1))
+    col_access = col_map.get("access", -1)
+
+    def _cell(row, idx):
+        return row[idx].strip() if 0 <= idx < len(row) else ""
+
+    for row in rows:
+        bits   = _cell(row, col_bits)
+        symbol = _cell(row, col_sym).upper() or "—"
+        desc   = _cell(row, col_desc)
+        access = _cell(row, col_access) or "R/W"
+        if not bits or bits.lower() in ("bit", "bits", "—", "-"):
+            continue
+        name = desc[:60] if desc else symbol
+        fields.append(BitField(bits=bits, symbol=symbol, name=name,
+                               description=desc, access=access))
+    return fields
+
+
+def _parse_pin_table(
+    rows: list[list[str]],
+    col_map: dict[str, int],
+    block: str,
+    part: str,
+    vendor: str,
+) -> list[Pin]:
+    """Parse a pin/pad table into Pin objects."""
+    pins: list[Pin] = []
+    col_pin    = col_map.get("pin",    -1)
+    col_signal = col_map.get("signal", col_map.get("symbol", -1))
+    col_iotype = col_map.get("iotype", col_map.get("access", -1))
+    col_desc   = col_map.get("desc",   -1)
+
+    def _cell(row, idx):
+        return row[idx].strip() if 0 <= idx < len(row) else ""
+
+    for row in rows:
+        pin    = _cell(row, col_pin)
+        signal = _cell(row, col_signal)
+        iotype = _cell(row, col_iotype)
+        desc   = _cell(row, col_desc)
+        if not pin and not signal:
+            continue
+        if pin.lower() in ("pin", "no.", "#", "pad", "number", "—", "-"):
+            continue
+        pins.append(Pin(
+            vendor=vendor, part=part, block=block,
+            pin=pin, signal=signal, type=iotype, description=desc,
+        ))
+    return pins
 
 
 # ── Per-section extraction ────────────────────────────────────────────────────
 
 def _extract_section(
-    client, model: str, part: str, section_name: str, md_text: str, cache: dict
-) -> tuple[list[dict], list[dict]]:
-    """Return (register_dicts, pin_dicts) for one section, using cache where possible."""
-    blk = block_title(section_name)
-    tables = _extract_tables(md_text)
-    reg_tables = [t for t in tables if t["is_reg"]]
-    pin_tables = [t for t in tables if t["is_pin"]]
+    text: str,
+    block: str,
+    part: str,
+    vendor: str,
+) -> tuple[list[RegisterCard], list[Pin]]:
+    """Extract RegisterCards and Pins from one section's markdown text."""
+    registers: list[RegisterCard] = []
+    pins: list[Pin] = []
 
-    registers: list[dict] = []
-    pins: list[dict] = []
+    # Accumulate bitfields per register name for this section
+    pending_bitfields: dict[str, list[BitField]] = {}
+    pending_cards: dict[str, RegisterCard] = {}
 
-    for t in reg_tables:
-        ckey = f"reg::{section_name}::{hash(t['text'])}"
-        if ckey in cache:
-            registers.extend(cache[ckey])
-            continue
-        try:
-            user = f"Context:\n{t['ctx']}\n\nTable:\n{t['text']}"
-            raw = _call_llm(client, model, _REGISTER_SYSTEM, user)
-            parsed = _parse_json(raw)
-            if isinstance(parsed, list):
-                for r in parsed:
-                    r.setdefault("block", blk)
-                    r.setdefault("part", part)
-                cache[ckey] = parsed
-                registers.extend(parsed)
-        except Exception as e:
-            print(f"  [warn] register extract failed ({section_name}): {e}")
+    for m in _TABLE_RE.finditer(text):
+        header_line = m.group("header")
+        rows_text   = m.group("rows")
 
-    for t in pin_tables:
-        ckey = f"pin::{section_name}::{hash(t['text'])}"
-        if ckey in cache:
-            pins.extend(cache[ckey])
-            continue
-        try:
-            user = f"Context:\n{t['ctx']}\n\nTable:\n{t['text']}"
-            raw = _call_llm(client, model, _PIN_SYSTEM, user)
-            parsed = _parse_json(raw)
-            if isinstance(parsed, list):
-                for p in parsed:
-                    p.setdefault("block", blk)
-                    p.setdefault("part", part)
-                cache[ckey] = parsed
-                pins.extend(parsed)
-        except Exception as e:
-            print(f"  [warn] pin extract failed ({section_name}): {e}")
+        headers = _split_row(header_line)
+        rows    = [_split_row(r) for r in rows_text.strip().splitlines()]
+        rows    = [r for r in rows if any(c for c in r)]
+
+        kind, col_map = _classify_table(headers)
+
+        if kind == "register_map":
+            ctx = _context_before(text, m.start())
+            cards = _parse_register_map(rows, col_map, block, part, vendor, ctx)
+            for c in cards:
+                key = c.register
+                pending_cards[key] = c
+            registers.extend(cards)
+
+        elif kind == "bitfield":
+            ctx  = _context_before(text, m.start())
+            heading = _nearest_heading(ctx)
+            reg_name, reg_addr = _extract_register_name_address(ctx)
+            if not reg_name:
+                reg_name = re.sub(r"[^A-Z0-9_]", "_", heading.upper())[:20]
+
+            bfs = _parse_bitfield_table(rows, col_map, reg_name, block, part, vendor)
+            if bfs:
+                pending_bitfields.setdefault(reg_name, []).extend(bfs)
+                # If we already have a RegisterCard for this register, enrich it
+                if reg_name in pending_cards:
+                    old = pending_cards[reg_name]
+                    updated = RegisterCard(
+                        vendor=old.vendor, part=old.part, block=old.block,
+                        register=old.register, name=old.name, section=old.section,
+                        addresses=old.addresses or ([("", reg_addr)] if reg_addr else []),
+                        bitfields=bfs, notes=old.notes,
+                    )
+                    pending_cards[reg_name] = updated
+                    # Replace in registers list
+                    registers = [updated if r.register == reg_name else r for r in registers]
+                else:
+                    # Create a minimal RegisterCard for this bitfield table
+                    card = RegisterCard(
+                        vendor=vendor, part=part, block=block,
+                        register=reg_name,
+                        name=heading or reg_name,
+                        section="",
+                        addresses=[("", reg_addr)] if reg_addr else [],
+                        bitfields=bfs, notes="",
+                    )
+                    pending_cards[reg_name] = card
+                    registers.append(card)
+
+        elif kind == "pin":
+            ctx = _context_before(text, m.start())
+            pin_block = block  # use section block as pin group
+            new_pins = _parse_pin_table(rows, col_map, pin_block, part, vendor)
+            pins.extend(new_pins)
 
     return registers, pins
 
 
-def _extract_catalog(client, model: str, part: str, md_text: str) -> dict:
-    try:
-        raw = _call_llm(client, model, _CATALOG_SYSTEM, md_text[:3000], max_tokens=256)
-        return _parse_json(raw)
-    except Exception as e:
-        print(f"  [warn] catalog extract failed ({part}): {e}")
-        return {}
+# ── Catalog extraction ────────────────────────────────────────────────────────
 
+def _extract_catalog_heuristic(first_md: str, part: str) -> dict:
+    """Extract vendor, title, revision from the first section's markdown."""
+    lines = first_md.splitlines()
 
-# ── Model → dataclass helpers ─────────────────────────────────────────────────
+    title = ""
+    vendor = ""
+    revision = ""
 
-def _to_register_cards(raws: list[dict], part: str, vendor: str) -> list[RegisterCard]:
-    cards = []
-    seen: set[str] = set()
-    for r in raws:
-        reg = (r.get("register") or "").strip().upper()
-        blk = (r.get("block") or "").strip()
-        if not reg or not blk:
-            continue
-        key = f"{blk}::{reg}"
-        if key in seen:
-            continue
-        seen.add(key)
+    for line in lines[:40]:
+        line = line.strip()
+        # First level-1 heading is usually the part title
+        if not title and line.startswith("# "):
+            title = line.lstrip("# ").strip()
+        # Look for vendor mentions
+        for kw in ("Analog Devices", "Texas Instruments", "STMicroelectronics",
+                   "NXP", "Microchip", "Maxim", "Infineon", "Renesas",
+                   "OmniVision", "Macronix", "Winbond", "ISSI"):
+            if kw.lower() in line.lower() and not vendor:
+                vendor = kw
+        # Look for revision / document number
+        rev_m = re.search(
+            r"(?:rev(?:ision)?\.?\s*|document\s*(?:no\.?\s*)?)[:\s]?([A-Z0-9][A-Z0-9._\-]{0,8})",
+            line, re.IGNORECASE,
+        )
+        if rev_m and not revision:
+            revision = rev_m.group(1).strip()
 
-        bfs = []
-        for b in r.get("bitfields") or []:
-            bfs.append(BitField(
-                bits=str(b.get("bits", "")),
-                symbol=str(b.get("symbol", "—")),
-                name=str(b.get("name", "")),
-                description=str(b.get("description", "")),
-                access=str(b.get("access", "")),
-            ))
-        addrs = []
-        for pair in r.get("addresses") or []:
-            if isinstance(pair, list) and len(pair) == 2:
-                addrs.append((str(pair[0]), str(pair[1])))
-            elif isinstance(pair, str):
-                addrs.append(("", pair))
-        cards.append(RegisterCard(
-            vendor=vendor,
-            part=part,
-            block=blk,
-            register=reg,
-            name=str(r.get("name", "")),
-            section=str(r.get("section", "")),
-            addresses=addrs,
-            bitfields=bfs,
-            notes=str(r.get("notes", "")),
-        ))
-    return cards
-
-
-def _to_pins(raws: list[dict], part: str, vendor: str) -> list[Pin]:
-    pins = []
-    seen: set[str] = set()
-    for p in raws:
-        pin = str(p.get("pin", "")).strip()
-        signal = str(p.get("signal", "")).strip()
-        if not pin and not signal:
-            continue
-        key = f"{pin}::{signal}"
-        if key in seen:
-            continue
-        seen.add(key)
-        pins.append(Pin(
-            vendor=vendor,
-            part=part,
-            block=str(p.get("block", "")),
-            pin=pin,
-            signal=signal,
-            type=str(p.get("type", "")),
-            description=str(p.get("description", "")),
-        ))
-    return pins
+    return {"vendor": vendor, "title": title or part, "revision": revision}
 
 
 # ── Main public API ────────────────────────────────────────────────────────────
@@ -271,85 +365,82 @@ def _to_pins(raws: list[dict], part: str, vendor: str) -> list[Pin]:
 def extract_structured(
     part: str,
     *,
-    workers: int | None = None,
     reset: bool = False,
+    verbose: bool = True,
 ) -> tuple[list[RegisterCard], list[Pin], PartMeta]:
-    """Extract structured data from MinerU markdown for one part.
+    """Parse MinerU markdown for one part into structured data — no LLM needed.
 
     Returns (register_cards, pins, part_meta).
     Writes registers.json, pins.json, catalog.json under data/<part>/.
     """
-    workers = workers or int(os.environ.get("EXTRACT_WORKERS", "4"))
-    client, model = _llm_client()
-
-    cache_path = extract_cache(part)
-    cache: dict = {}
-    if not reset and cache_path.exists():
-        try:
-            cache = json.loads(cache_path.read_text(encoding="utf-8"))
-        except Exception:
-            pass
-
     sections = iter_sections(part)
     if not sections:
-        raise SystemExit(f"No MinerU markdown found for part '{part}'. "
-                         f"Run pdf_to_md.py first.")
+        raise SystemExit(
+            f"No MinerU markdown found for part '{part}'. "
+            f"Run tools/pdf_to_md.py --part {part} first."
+        )
 
-    all_regs: list[dict] = []
-    all_pins: list[dict] = []
-
-    print(f"  Extracting {len(sections)} sections for {part} "
-          f"(model={model}, workers={workers})…")
-
-    def _process(sec):
-        md = sec.path.read_text(encoding="utf-8", errors="replace")
-        return _extract_section(client, model, part, sec.section_name, md, cache)
-
-    try:
-        with ThreadPoolExecutor(max_workers=workers) as ex:
-            futs = {ex.submit(_process, sec): sec for sec in sections}
-            for fut in as_completed(futs):
-                sec = futs[fut]
-                try:
-                    regs, pins = fut.result()
-                    all_regs.extend(regs)
-                    all_pins.extend(pins)
-                    print(f"  {sec.section_name}: {len(regs)} registers, {len(pins)} pins")
-                except Exception as e:
-                    print(f"  {sec.section_name}: FAILED — {e}")
-    finally:
-        cache_path.write_text(json.dumps(cache, indent=2, ensure_ascii=False), encoding="utf-8")
+    if verbose:
+        print(f"  Parsing {len(sections)} sections for {part} (heuristic, no LLM)…")
 
     # Extract catalog metadata from the first section
     first_md = sections[0].path.read_text(encoding="utf-8", errors="replace")
-    cat_raw = _extract_catalog(client, model, part, first_md)
-    vendor = str(cat_raw.get("vendor", ""))
+    cat_raw = _extract_catalog_heuristic(first_md, part)
+    vendor = cat_raw.get("vendor", "")
+
+    all_regs: list[RegisterCard] = []
+    all_pins: list[Pin] = []
+
+    for sec in sections:
+        blk = block_title(sec.section_name)
+        md  = sec.path.read_text(encoding="utf-8", errors="replace")
+        regs, pins = _extract_section(md, blk, part, vendor)
+        if verbose and (regs or pins):
+            print(f"    {sec.section_name}: {len(regs)} registers, {len(pins)} pins")
+        all_regs.extend(regs)
+        all_pins.extend(pins)
+
+    # Deduplicate registers by (block, register) key
+    seen_regs: set[str] = set()
+    deduped_regs: list[RegisterCard] = []
+    for c in all_regs:
+        key = f"{c.block}::{c.register}"
+        if key not in seen_regs:
+            seen_regs.add(key)
+            deduped_regs.append(c)
+
+    # Deduplicate pins by (pin, signal) key
+    seen_pins: set[str] = set()
+    deduped_pins: list[Pin] = []
+    for p in all_pins:
+        key = f"{p.pin}::{p.signal}"
+        if key not in seen_pins:
+            seen_pins.add(key)
+            deduped_pins.append(p)
+
     meta = PartMeta(
         part=part,
         vendor=vendor,
-        title=str(cat_raw.get("title", "")),
+        title=cat_raw.get("title", part),
         blocks=sorted({block_title(s.section_name) for s in sections}),
-        revision=str(cat_raw.get("revision", "")),
+        revision=cat_raw.get("revision", ""),
     )
 
-    reg_cards = _to_register_cards(all_regs, part, vendor)
-    pins = _to_pins(all_pins, part, vendor)
-
     # Persist JSON artefacts
-    _pdir = part_dir(part)
     registers_json(part).write_text(
-        json.dumps([c.to_dict() for c in reg_cards], indent=2, ensure_ascii=False),
+        json.dumps([c.to_dict() for c in deduped_regs], indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
     pins_json(part).write_text(
-        json.dumps([p.__dict__ for p in pins], indent=2, ensure_ascii=False),
+        json.dumps([p.__dict__ for p in deduped_pins], indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
-    from dataclasses import asdict
     catalog_json(part).write_text(
         json.dumps(asdict(meta), indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
 
-    print(f"  Done: {len(reg_cards)} register cards, {len(pins)} pins → data/{part}/")
-    return reg_cards, pins, meta
+    if verbose:
+        print(f"  Done: {len(deduped_regs)} registers, {len(deduped_pins)} pins "
+              f"→ data/{part}/")
+    return deduped_regs, deduped_pins, meta
