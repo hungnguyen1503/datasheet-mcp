@@ -1,0 +1,18 @@
+# Normalize line endings to LF in the repository
+* text=auto eol=lf
+
+# Explicit overrides
+*.py   text eol=lf
+*.sh   text eol=lf
+*.bat  text eol=crlf
+*.md   text eol=lf
+*.json text eol=lf
+*.txt  text eol=lf
+*.env* text eol=lf
+
+# Binaries
+*.pdf  binary
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.lance binary

@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "ds": {
+      "command": "python",
+      "args": ["C:/Users/Admin/hungquangnguyen/03_AI/08_datasheetMCP/mcp/server.py"]
+    }
+  }
+}
