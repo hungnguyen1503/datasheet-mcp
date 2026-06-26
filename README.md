@@ -6,6 +6,33 @@
 
 ---
 
+## ⚡ Quick start
+
+```bash
+# 1. Clone and install
+git clone https://github.com/hungnguyen1503/datasheet-mcp.git
+cd datasheet-mcp
+pip install -r mcp/requirements.txt
+
+# 2. Register with your AI client — add to .mcp.json (replace the path):
+#    "ds": { "command": "python", "args": ["/path/to/datasheet-mcp/mcp/server.py"] }
+
+# 3. Start querying — pre-indexed parts are ready immediately:
+#    ds_auto("ADXL345", "how do I configure the FIFO?")
+#    ds_lookup_register("ADXL345", "POWER_CTL")
+#    ds_find_pin("ADXL345")
+```
+
+To **add your own datasheet**, drop the PDF in a folder and run:
+
+```bash
+python tools/ingest.py --pdf /path/to/YourPart.pdf
+```
+
+That's it — the folder, markdown, and index are created automatically.
+
+---
+
 ## 🏗️ Architecture
 
 ```mermaid
@@ -134,32 +161,30 @@ Paste into the MCP settings UI or `cline_mcp_settings.json`:
 
 ## 🛠️ The tools
 
+6 tools total. Always start with **`ds_auto`** — it routes to the correct backend automatically.
+
 | Tool | Args | What it does |
 |---|---|---|
-| `ds_auto` | `part`, `query` | 🚦 **Start here** — single entry point that auto-routes to the right backend |
-| `ds_search` | `part`, `query` | 🔍 Hybrid semantic + keyword search — spec tables, supply voltage, overviews |
-| `ds_search` | `part`, `query`, `operation_only=True` | ⚙️ Init sequence, power-up procedure, operating modes (ordered) |
-| `ds_lookup_register` | `part`, `register` | 📄 Full register card — addresses + every bit field |
-| `ds_lookup_register` | `part`, `register`, `bit=…` | 🔬 Single bit/field row — `MEASURE`, `FULL_RES`, `RANGE[1:0]` |
-| `ds_find_pin` | `part` | 📌 Full pinout — signal names, types, descriptions |
+| `ds_auto` | `part`, `query` | 🚦 **Start here** — auto-routes every query to the right backend |
+| `ds_search` | `part`, `query` | 🔍 Hybrid search for specs, values, overviews; add `operation_only=True` for ordered init/procedure sections |
+| `ds_lookup_register` | `part`, `register` | 📄 Full register card (addresses + bit fields); add `bit=` for a single bit/field row |
+| `ds_find_pin` | `part` | 📌 Full pinout — signal names, I/O types, descriptions |
 | `ds_neighbors` | `part`, `node` | 🧩 Dependency graph — what a block or register depends on |
-| `ds_list` | *(none)* | 📋 List all indexed parts |
-| `ds_list` | `part` | 📦 List functional blocks and register counts for a part |
+| `ds_list` | `[part]` | 📋 Omit `part` → list all indexed parts; supply `part` → list its blocks |
 
 > ⚠️ **`part` is required on every call except `ds_list()`.** This prevents identically
 > named registers on different ICs from ever mixing up their data.
 
-**📋 Recommended order for working with a datasheet:**
+**📋 Typical workflow:**
 
 ```
-1. ds_list()                → confirm the part name is indexed
-2. ds_list("ADXL345")       → see available functional blocks
-3. ds_auto / ds_search(operation_only=True)  → understand init sequence first
-4. ds_lookup_register       → look up each register by symbol
-5. ds_lookup_register + bit → drill into a specific bit if needed
-6. ds_search                → open-ended conceptual / spec questions
-7. ds_find_pin              → pinout and signal assignments
-8. ds_neighbors             → trace register / block dependencies
+1. ds_list()                          → confirm the part name is indexed
+2. ds_auto("ADXL345", "how to init")  → get started with the init sequence
+3. ds_lookup_register("ADXL345", "POWER_CTL")         → inspect a register
+4. ds_lookup_register("ADXL345", "POWER_CTL", bit="MEASURE")  → single bit
+5. ds_search("ADXL345", "supply voltage range")        → spec questions
+6. ds_find_pin("ADXL345")             → pinout
+7. ds_neighbors("ADXL345", "FIFO")    → block dependencies
 ```
 
 ### Query routing inside `ds_auto`
@@ -183,33 +208,18 @@ flowchart LR
 
 ## 📦 Adding a new datasheet
 
-### Step 0 — Get the project
-
-```bash
-git clone https://github.com/hungnguyen1503/datasheet-mcp.git
-cd datasheet-mcp
-pip install -r mcp/requirements.txt
-pip install InquirerPy          # optional — adds fuzzy TUI selector
-```
-
-> **No LLM required.** Stage 2 uses a heuristic markdown-table parser (column-header
-> pattern matching). No LMStudio, Ollama, or API key needed.
+> **No LLM required.** Stage 2 uses a heuristic markdown-table parser.
+> No LMStudio, Ollama, or API key needed. `pip install InquirerPy` adds a
+> fuzzy TUI selector (optional — numbered fallback is built-in).
 
 ### Step 1 — Ingest with the unified CLI (recommended)
 
 ```bash
-# Scan a folder, pick PDFs interactively, run all stages automatically:
-python tools/ingest.py --dir /path/to/your/pdfs
+python tools/ingest.py --pdf /downloads/LM358.pdf      # single file
+python tools/ingest.py --dir /path/to/pdfs             # pick from folder (fuzzy TUI)
+python tools/ingest.py --pdf LM358.pdf --backend pymupdf  # CPU-only, no MinerU needed
 
-# Or ingest a single file directly (skips the TUI):
-python tools/ingest.py --pdf /downloads/LM358.pdf
-
-# Flags:
-#   --no-extract      skip table extraction (use cached registers.json)
-#   --no-prose        skip prose index  (registers + pins only, fastest)
-#   --no-graph        skip dependency graph build
-#   --reset           drop existing LanceDB tables and rebuild from scratch
-#   --backend pymupdf use PyMuPDF instead of MinerU (no GPU needed)
+# Other flags: --no-prose  --no-graph  --no-extract  --reset
 ```
 
 **⏱️ How long does it take?** (per part, typical 30–50 page datasheet)
