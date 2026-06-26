@@ -30,7 +30,7 @@ graph TB
 
     subgraph Server["⚡ MCP Server  (stdio)"]
         SRV["mcp/server.py<br/>FastMCP"]
-        TOOLS["8 ds_* tools"]
+        TOOLS["6 ds_* tools"]
     end
 
     subgraph Clients["💬 MCP Clients"]
@@ -138,23 +138,23 @@ Paste into the MCP settings UI or `cline_mcp_settings.json`:
 |---|---|---|
 | `ds_auto` | `part`, `query` | 🚦 **Start here** — single entry point that auto-routes to the right backend |
 | `ds_search` | `part`, `query` | 🔍 Hybrid semantic + keyword search — spec tables, supply voltage, overviews |
+| `ds_search` | `part`, `query`, `operation_only=True` | ⚙️ Init sequence, power-up procedure, operating modes (ordered) |
 | `ds_lookup_register` | `part`, `register` | 📄 Full register card — addresses + every bit field |
 | `ds_lookup_register` | `part`, `register`, `bit=…` | 🔬 Single bit/field row — `MEASURE`, `FULL_RES`, `RANGE[1:0]` |
-| `ds_get_operation` | `part`, `block` | ⚙️ Init sequence, power-up procedure, operating modes |
 | `ds_find_pin` | `part` | 📌 Full pinout — signal names, types, descriptions |
 | `ds_neighbors` | `part`, `node` | 🧩 Dependency graph — what a block or register depends on |
-| `ds_list_parts` | — | 📋 List all indexed parts — call first if unsure of the part name |
-| `ds_list_blocks` | `part` | 📦 List functional blocks and register counts for a part |
+| `ds_list` | *(none)* | 📋 List all indexed parts |
+| `ds_list` | `part` | 📦 List functional blocks and register counts for a part |
 
-> ⚠️ **`part` is required on every call.** This prevents identically named registers
-> on different ICs from ever mixing up their data.
+> ⚠️ **`part` is required on every call except `ds_list()`.** This prevents identically
+> named registers on different ICs from ever mixing up their data.
 
 **📋 Recommended order for working with a datasheet:**
 
 ```
-1. ds_list_parts            → confirm the part name is indexed
-2. ds_list_blocks           → see available functional blocks
-3. ds_get_operation         → understand init sequence and modes first
+1. ds_list()                → confirm the part name is indexed
+2. ds_list("ADXL345")       → see available functional blocks
+3. ds_auto / ds_search(operation_only=True)  → understand init sequence first
 4. ds_lookup_register       → look up each register by symbol
 5. ds_lookup_register + bit → drill into a specific bit if needed
 6. ds_search                → open-ended conceptual / spec questions
@@ -167,7 +167,7 @@ Paste into the MCP settings UI or `cline_mcp_settings.json`:
 ```mermaid
 flowchart LR
     Q(["user query"]) --> R1{"procedural keyword?\nhow to · configure\nenable · sequence\nstartup · power-up"}
-    R1 -- Yes --> OP["ds_get_operation\n⟶ block"]
+    R1 -- Yes --> OP["ds_search\noperation_only=True\n⟶ block"]
 
     R1 -- No --> R2{"pin keyword?\npinout · SDA · SCL\nwhich pin · pad"}
     R2 -- Yes --> PIN["ds_find_pin\n⟶ block / signal"]

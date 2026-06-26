@@ -9,32 +9,29 @@ TOOL ROUTING POLICY (read before choosing a tool):
                         dispatched automatically to the correct backend.
 
   ds_search          → DEFAULT for any conceptual / value question:
-                        supply voltage, current, sensitivity, package, ranges,
-                        feature overviews, spec tables, dependency questions.
-                        Results include a "Depends on:" footer when graph edges exist.
+                        supply voltage, sensitivity, package, bandwidth, overview,
+                        spec tables, and dependency questions ("what enables X?").
+                        Set operation_only=True for init/procedure sections instead.
 
-  ds_lookup_register → ONLY when the user explicitly names a register symbol OR a
-                        bit/flag. Omit `bit` for the full register card; supply
-                        `bit` for one bit row.
-
-  ds_get_operation   → ONLY for procedural / how-to questions:
-                        "how to configure the FIFO", "initialization sequence".
+  ds_lookup_register → ONLY when user explicitly names a register symbol OR a
+                        bit/flag. Omit `bit` for full card; supply `bit` for one row.
 
   ds_find_pin        → ONLY for pin/pad questions:
-                        "which pin is SDA?", "pinout", "package pins".
+                        "which pin is SDA?", "pinout", "CS signal".
 
   ds_neighbors       → dependency graph around a block or register node.
 
-  ds_list_parts      → ONLY when the user explicitly asks which parts are indexed.
-  ds_list_blocks     → ONLY when the user explicitly asks for a part's blocks.
+  ds_list            → ONLY when user explicitly asks for a list:
+                        omit `part` to list all indexed parts;
+                        supply `part` to list that part's functional blocks.
 
 GLOBAL RULES:
   1. Use exactly ONE tool per query. One call, then stop.
-  2. Do NOT chain ds_search + ds_lookup_register + ds_get_operation together.
-  3. Never call ds_list_parts or ds_list_blocks automatically.
+  2. Do NOT chain ds_search + ds_lookup_register + ds_search(operation_only=True).
+  3. Never call ds_list automatically — only when the user explicitly asks.
 
-Run (stdio):  python -m ds.mcp_server   (or  python mcp/server.py)
-Run (HTTP):   DS_TRANSPORT=streamable-http python -m ds.mcp_server
+Run (stdio):  python mcp/server.py
+Run (HTTP):   DS_TRANSPORT=streamable-http python mcp/server.py
 """
 
 from __future__ import annotations
@@ -95,28 +92,37 @@ def _d() -> DS:
     return _ds
 
 
-@mcp.tool()
-def ds_list_parts() -> str:
-    """List the datasheet parts currently indexed.
-
-    Call ONLY when the user explicitly asks which parts/devices are supported
-    (e.g. "what datasheets do you have?"). The part name is otherwise always
-    provided by the user.
-    """
-    return _d().list_parts().text
-
+# ── Tool 1: catalog listing (merged ds_list_parts + ds_list_blocks) ───────────
 
 @mcp.tool()
-def ds_list_blocks(part: str) -> str:
-    """List the functional blocks (with register counts) for one part.
+def ds_list(part: str = "") -> str:
+    """Catalog lookup — two modes controlled by whether `part` is supplied.
 
-    Call ONLY when the user explicitly asks which blocks a part has.
+    Mode 1 — part omitted (or ""):
+      Returns all indexed parts with vendor and revision.
+      Call when user asks: "what datasheets are indexed?",
+      "what parts do you have?", "list all parts".
+
+    Mode 2 — part supplied:
+      Returns functional blocks + register counts for that part.
+      Call when user asks: "what blocks does ADXL345 have?",
+      "list ADXL345 sections", "what's in OV7670?".
+
+    Call ONLY when user explicitly asks for a list.
+    Never call automatically before a search or lookup — the part
+    name is always provided by the user in those contexts.
 
     Args:
-        part: Part name, e.g. "ADXL345". Required.
+        part: Part name to list blocks for, e.g. "ADXL345".
+              Omit (or pass "") to list all indexed parts.
     """
-    return _d().list_blocks(part).text
+    d = _d()
+    if not part:
+        return d.list_parts().text
+    return d.list_blocks(part).text
 
+
+# ── Tool 2: register lookup ────────────────────────────────────────────────────
 
 @mcp.tool()
 def ds_lookup_register(
@@ -126,20 +132,23 @@ def ds_lookup_register(
 
     Use ONLY when the user explicitly names a register symbol or a bit/flag.
 
-    Mode 1 — Full register (bit omitted): addresses + all bit fields.
-      Examples: "Explain POWER_CTL", "Show FIFO_CTL bits", "DATA_FORMAT register"
-    Mode 2 — Single bit (bit supplied): only the one bit/flag row.
-      Examples: "What is the MEASURE bit?", "FULL_RES flag", "RANGE field"
+    Mode 1 — Full register (bit omitted):
+      Returns addresses + all bit fields for the register.
+      Examples: "explain POWER_CTL", "show FIFO_CTL bits", "DATA_FORMAT register"
+
+    Mode 2 — Single bit (bit supplied):
+      Returns only the one bit/flag row — smallest possible answer.
+      Examples: "what is the MEASURE bit?", "FULL_RES flag", "RANGE field"
 
     Do NOT use for value/overview questions (→ ds_search), procedures
-    (→ ds_get_operation), or pins (→ ds_find_pin).
+    (→ ds_search with operation_only=True), or pins (→ ds_find_pin).
 
     Args:
         part: Part name, e.g. "ADXL345". Required.
         register: Register symbol, e.g. "POWER_CTL". Required.
-        block: Optional — disambiguates if the symbol exists in multiple blocks.
-        bit: Optional — bit symbol/name. Supply to get one bit instead of the card.
-        bits: Set False for just the header line (address + name). Ignored when bit is set.
+        block: Optional — disambiguates if symbol exists in multiple blocks.
+        bit: Optional — bit symbol/name. Supply to get one bit instead of card.
+        bits: Set False for just the header line. Ignored when bit is set.
     """
     d = _d()
     if bit:
@@ -147,50 +156,61 @@ def ds_lookup_register(
     return d.lookup_register(part, register, block=block or None, bits=bits).text
 
 
+# ── Tool 3: hybrid search + operation (merged ds_search + ds_get_operation) ───
+
 @mcp.tool()
-def ds_search(part: str, query: str, block: str = "", k: int = 5) -> str:
-    """Semantic + BM25 hybrid search — the DEFAULT tool for most questions.
+def ds_search(
+    part: str,
+    query: str,
+    block: str = "",
+    k: int = 5,
+    operation_only: bool = False,
+) -> str:
+    """Hybrid semantic + BM25 search — two modes.
 
-    Use for ALL conceptual / value questions:
-      - Electrical values: "supply voltage range", "operating current", "sensitivity"
-      - Specs/features: "I2C address", "output data rates", "FIFO modes overview"
-      - Mechanical: "package type", "pin count"
-      - Dependency questions: results add a "Depends on:" footer when edges exist.
+    Mode 1 — Default (operation_only=False):
+      Semantic + BM25 hybrid over all prose + register names.
+      Use for ALL conceptual / value questions:
+        - Electrical: "supply voltage range", "operating current"
+        - Specs: "I2C address", "output data rates", "FIFO modes overview"
+        - Features: "what does the MEASURE bit do", "self-test feature"
+      Results include a "Depends on:" footer when graph edges exist.
 
-    This tool is SUFFICIENT on its own. Do NOT also call ds_lookup_register or
-    ds_get_operation for the same question.
+    Mode 2 — operation_only=True:
+      Returns initialization / procedure sections in document order.
+      Use for HOW-TO questions:
+        "how to configure FIFO", "startup sequence", "power-up procedure",
+        "enable measurement mode", "SPI initialization steps".
+      When set, `query` is ignored — `block` narrows scope instead.
+
+    This tool is SUFFICIENT on its own for these questions.
+    Do NOT also call ds_lookup_register or ds_search(operation_only=True)
+    for the same question.
+
+    Prefer ds_auto over calling this directly.
 
     Args:
         part: Part name, e.g. "ADXL345". Required.
-        query: Natural-language question or keywords.
-        block: Optional — narrows results to one functional block.
-        k: Number of prose passages to retrieve (default 5).
+        query: Natural-language question or keywords (ignored when operation_only=True).
+        block: Optional block filter, e.g. "FIFO".
+        k: Number of prose passages (default 5). Ignored when operation_only=True.
+        operation_only: True → return ordered init/procedure sections (no vector search).
     """
-    return _d().search(part, query, block=block or None, k=k).text
+    d = _d()
+    if operation_only:
+        return d.get_operation(part, block or None).text
+    return d.search(part, query, block=block or None, k=k).text
 
 
-@mcp.tool()
-def ds_get_operation(part: str, block: str = "") -> str:
-    """Retrieve the operating procedure / initialization sequence.
-
-    Use ONLY for procedural / how-to questions:
-      "how to configure the FIFO", "initialization sequence", "power-up procedure",
-      "how to enable measurement mode".
-
-    Args:
-        part: Part name, e.g. "ADXL345". Required.
-        block: Optional functional block, e.g. "FIFO". Omit to get all operation
-               sections for the part.
-    """
-    return _d().get_operation(part, block or None).text
-
+# ── Tool 4: pin finder ─────────────────────────────────────────────────────────
 
 @mcp.tool()
 def ds_find_pin(part: str, block: str = "", signal: str = "") -> str:
     """Find pin / pad assignments for a part.
 
     Use ONLY for pin/pad questions:
-      "which pin is SDA?", "pinout", "package pins", "serial interface pins".
+      "which pin is SDA?", "pinout", "package pins", "serial interface pins",
+      "what is the CS pin?", "show all power pins".
 
     Args:
         part: Part name, e.g. "ADXL345". Required.
@@ -199,6 +219,8 @@ def ds_find_pin(part: str, block: str = "", signal: str = "") -> str:
     """
     return _d().find_pin(part, block=block or None, signal=signal or None).text
 
+
+# ── Tool 5: dependency graph ───────────────────────────────────────────────────
 
 @mcp.tool()
 def ds_neighbors(part: str, node: str, depth: int = 2) -> str:
@@ -210,11 +232,13 @@ def ds_neighbors(part: str, node: str, depth: int = 2) -> str:
 
     Args:
         part: Part name, e.g. "ADXL345". Required.
-        node: A block name ("FIFO"), register symbol ("POWER_CTL"), or node path.
-        depth: Traversal depth, 1-3 (default 2).
+        node: Block name ("FIFO"), register symbol ("POWER_CTL"), or node path.
+        depth: Traversal depth, 1–3 (default 2).
     """
     return _d().neighbors(part, node, depth=depth).text
 
+
+# ── Tool 6: auto-router ────────────────────────────────────────────────────────
 
 @mcp.tool()
 def ds_auto(part: str, query: str, block: str = "") -> str:
