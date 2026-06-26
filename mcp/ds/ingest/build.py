@@ -1,17 +1,14 @@
-"""Orchestrate indexing of one part into Qdrant + the dependency graph.
+"""Orchestrate indexing of one part into LanceDB + the dependency graph.
 
-Reads:
-  - data/<part>/registers.json  (from tools/extract_structured.py)
-  - data/<part>/pins.json       (from tools/extract_structured.py)
-  - data/<part>/catalog.json    (from tools/extract_structured.py)
-  - data/<part>/MD/**/*.md      (from tools/pdf_to_md.py — for prose)
+Reads two sources produced by earlier stages:
+  JSON (Stage 2)  — data/<part>/registers.json, pins.json, catalog.json
+  Markdown (Stage 1) — data/<part>/MD/**/*.md  (for prose + graph)
 
-Then pushes to Qdrant:
-  1. ds_registers  ← RegisterCard objects (dense vector)
-  2. ds_pins       ← Pin objects (payload-only lookup)
-  3. ds_catalog    ← PartMeta (payload-only metadata)
-  4. ds_prose      ← ProseBlocks from MinerU markdown (dense + sparse hybrid)
-  5. ds_graph      ← structural + reference + dependency edges
+Pushes to LanceDB:
+  1. ds_registers  ← RegisterCard objects (dense vector + FTS)
+  2. ds_pins       ← Pin objects (filter-only, no vector)
+  3. ds_prose      ← ProseBlocks from MinerU markdown (dense vector + FTS)
+  4. ds_graph      ← structural + reference + dependency edges (filter-only)
 
 Idempotent per part (each store clears the part before re-adding).
 """

@@ -12,10 +12,13 @@
 graph TB
     subgraph Build["🖥️ Your Machine  (one-time ingestion)"]
         PDF[/"📄 Datasheets<br/>ADXL345.pdf · OV7670.pdf · …"/]
-        S1["⚙️ Stage 1<br/>PDF → Markdown<br/>MinerU / PyMuPDF"]
-        S2["⚙️ Stage 2<br/>Markdown → JSON<br/>heuristic table parser"]
-        S3["⚙️ Stage 3<br/>JSON → LanceDB<br/>embed + FTS index"]
         GPU{"CUDA?"}
+        S1H["MinerU hybrid-engine<br/>(built-in VLM for tables)"]
+        S1P["MinerU pipeline<br/>(text-only · CPU-safe)"]
+        MD[/"📁 data/PART/MD/<br/>chapter markdown"/]
+        S2["⚙️ Stage 2<br/>Heuristic table parser<br/>extract_structured.py"]
+        JSON[/"registers.json<br/>pins.json · catalog.json"/]
+        S3["⚙️ Stage 3<br/>build.bat<br/>embed + FTS index"]
     end
 
     subgraph DB["🗄️ LanceDB  (local · data/.lancedb/)"]
@@ -34,15 +37,19 @@ graph TB
         CLI["Claude Code · Claude Desktop<br/>Cursor · Cline"]
     end
 
-    PDF --> S1
-    S1 --> GPU
-    GPU -- "Yes" --> S1H["MinerU<br/>hybrid-engine"]
-    GPU -- "No" --> S1P["MinerU<br/>pipeline (CPU-fast)"]
-    S1H & S1P --> S2 --> S3
+    PDF --> GPU
+    GPU -- "Yes" --> S1H --> MD
+    GPU -- "No"  --> S1P --> MD
+    MD --> S2 --> JSON --> S3
+    MD -->|"prose blocks"| S3
     S3 -->|"registers · prose · pins · graph"| R & P & PI & G
     R & P & PI & G -->|"local read"| SRV
     SRV --> TOOLS -->|"tool calls"| CLI
 ```
+
+> **No CLIP, no visual search.** All retrieval is text-only — dense BGE vectors + BM25
+> FTS. The `hybrid-engine` label refers to MinerU's internal PDF parsing strategy
+> (text + layout + table VLM), **not** cross-modal image/text embedding.
 
 ### ✨ Search quality
 
@@ -53,9 +60,9 @@ semantically-similar passages are ranked together in one pass.
 | Feature | Benefit |
 |---|---|
 | 🔀 Hybrid dense + BM25 vectors | Best result ranked first — symbol and meaning in one call |
-| 🎯 Prefetch oversampling (k×4) | Better recall — fewer relevant passages missed |
 | 🗂️ Block-diverse grouping | Results spread across functional blocks, not monopolised by one |
 | 🔍 Semantic register fuzzy match | "power on" finds `POWER_CTL` without knowing the exact symbol |
+| 🔁 Optional cross-encoder reranker | `DS_RERANKER_MODEL` boosts precision on ambiguous queries |
 | 🧩 Dependency graph | `ds_neighbors` traces what must be enabled before a register works |
 
 ---
@@ -204,6 +211,21 @@ python tools/ingest.py --pdf /downloads/LM358.pdf
 #   --reset           drop existing LanceDB tables and rebuild from scratch
 #   --backend pymupdf use PyMuPDF instead of MinerU (no GPU needed)
 ```
+
+**⏱️ How long does it take?** (per part, typical 30–50 page datasheet)
+
+| Path | Stage 1 | Stage 2 | Stage 3 (embed) | Total |
+|---|---|---|---|---|
+| GPU + MinerU hybrid-engine | ~1–2 min | ~2 s | ~20–30 s | **~2–3 min** |
+| CPU + MinerU pipeline | ~3–5 min | ~2 s | ~60–90 s | **~5–7 min** |
+| CPU + PyMuPDF (`--backend pymupdf`) | ~5–10 s | ~2 s | ~60–90 s | **~1–2 min** |
+
+> **About MinerU `hybrid-engine` and VLM:** When CUDA is available, Stage 1 uses
+> MinerU's `hybrid-engine` mode which has a built-in VLM to recognise table structure
+> and figures inside the PDF. This is MinerU's own internal model — datasheetMCP does
+> **not** run a separate Qwen caption step (`caption_tiles.py` belongs to SchematicMCP).
+> On CPU, `pipeline` mode is selected automatically: pure text extraction, no VLM,
+> no GPU required. There is **no CLIP** or visual embedding anywhere in this project.
 
 **What happens under the hood:**
 
@@ -417,7 +439,7 @@ datasheet-mcp/
 │   └── ADXL345/               ← one folder per indexed part
 │       ├── source.pdf
 │       ├── MD/                ← MinerU markdown sections
-│       ├── registers.json
+│       ├── registers.json      ← extracted by Stage 2 heuristic parser
 │       ├── pins.json
 │       └── catalog.json
 └── tests/                     ← 160 unit tests (no DB / LLM needed)
