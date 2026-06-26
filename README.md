@@ -291,8 +291,8 @@ python mcp/server.py                         # server starts — Ctrl+C to stop
 Then in Claude Code or the MCP Inspector:
 
 ```
-ds_list_parts()                              # ADXL345 should appear
-ds_list_blocks("ADXL345")                   # check block list
+ds_list()                                    # ADXL345 should appear
+ds_list("ADXL345")                           # check block list
 ds_lookup_register("ADXL345", "POWER_CTL") # spot-check a register
 ```
 
@@ -395,7 +395,7 @@ HUM-style static bearer-token auth — only needed when `DS_TRANSPORT=streamable
 | Table | Vectors | FTS | Key fields | Used by |
 |---|---|---|---|---|
 | `ds_registers` | dense 384-dim | `register`, `name` | vendor, part, block, register, bitfields (JSON), addresses (JSON) | `ds_lookup_register`, `ds_search` |
-| `ds_prose` | dense 384-dim | `text`, `heading`, `breadcrumb` | part, block, section, is_operation | `ds_search`, `ds_get_operation` |
+| `ds_prose` | dense 384-dim | `text`, `heading`, `breadcrumb` | part, block, section, is_operation | `ds_search`, `ds_search(operation_only=True)` |
 | `ds_pins` | none | none | part, block, pin, signal, type, description | `ds_find_pin` |
 | `ds_graph` | none | none | part, edge_type, source_id, target_id, label, weight | `ds_neighbors` |
 
@@ -412,7 +412,7 @@ datasheet-mcp/
 │   ├── requirements.txt
 │   ├── .env.example
 │   └── ds/                    ← main Python package
-│       ├── mcp_server.py      ← FastMCP tool definitions (8 tools)
+│       ├── mcp_server.py      ← FastMCP tool definitions (6 tools)
 │       ├── query.py           ← DS facade (lookup / search / auto)
 │       ├── router.py          ← regex query classifier
 │       ├── model.py           ← RegisterCard, Pin, ProseBlock, …
@@ -451,12 +451,12 @@ datasheet-mcp/
 
 | Symptom | Fix |
 |---|---|
-| ❌ `ds_list_parts()` returns empty | Parts not indexed — run `python tools/ingest.py` |
+| ❌ `ds_list()` returns empty | Parts not indexed — run `python tools/ingest.py` |
 | ❌ `MinerU not found` | `pip install mineru` or use `--backend pymupdf` |
 | ⚠️ `dim mismatch — recreating table` | `DS_EMBED_MODEL` changed — expected, table auto-rebuilds |
 | ⚠️ No results from `ds_lookup_register` | Register not extracted — check `data/<P>/registers.json`; table headers may be non-standard |
 | ⚠️ `ds_search` returns empty on first call | Embedding model is still loading (~10 s). Retry for full results. |
-| ⚠️ `ds_get_operation` returns nothing | No operation-heading text found — `ds_search` with the query still works |
+| ⚠️ `ds_search(operation_only=True)` returns nothing | No operation-heading text found — `ds_search` (default mode) still finds it |
 | ❌ No hybrid search results | FTS index not built — re-run `build.bat --part <P>` after data is added |
 | ⏱️ CPU indexing very slow | Reduce batch size: `DS_EMBED_BATCH_SIZE=16` in `mcp/.env` |
 | ❌ Build fails: `No markdown found` | Stage 1 not run — run `python tools/pdf_to_md.py --part <P>` first |
