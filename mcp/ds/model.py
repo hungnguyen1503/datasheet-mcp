@@ -89,6 +89,7 @@ class ProseBlock:
     breadcrumb: str             # "Part > Block > Heading"
     text: str                   # the prose body (no tables)
     register: Optional[str] = None   # set when the prose is register-scoped
+    content_type: str = "general"    # "operation" | "spec" | "order" | "general"
     revision: str = ""               # datasheet revision
 
     def embed_text(self) -> str:

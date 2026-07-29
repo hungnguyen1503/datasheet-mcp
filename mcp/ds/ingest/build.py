@@ -96,20 +96,17 @@ def build_part(
     print(f"  Part {part}: {len(cards)} registers, {len(pins)} pins, "
           f"vendor={meta.vendor or '?'}, rev={meta.revision or '?'}")
 
-    # 1. Registers + catalog
-    from ..index.registers import RegisterStore
-    rs = RegisterStore()
+    # 1. Registers + catalog + pins
+    from ..index.regstore_qdrant import RegisterStoreQdrant
+    rs = RegisterStoreQdrant()
     rs.clear_part(part)
     for card in cards:
         rs.add_register(card)
+    # Pin data is also pushed through the same store
+    rs.add_pins(pins)
     rs.commit()
 
-    # 2. Pins
-    from ..index.pins import PinStore
-    ps = PinStore()
-    ps.clear_part(part)
-    ps.add_pins(pins)
-    ps.commit()
+    # 2. Pins are now handled by RegisterStoreQdrant above
 
     # 3 + 4. Prose + graph
     prose_blocks = []
@@ -119,8 +116,8 @@ def build_part(
         print(f"  Prose: {len(prose_blocks)} blocks")
 
     if with_prose:
-        from ..index.prose import ProseIndex
-        pi = ProseIndex()
+        from ..index.prose_qdrant import ProseIndexQdrant
+        pi = ProseIndexQdrant()
         pi.clear_part(part)
         pi.add_blocks(prose_blocks)
         pi.flush()
@@ -128,9 +125,9 @@ def build_part(
 
     n_edges = 0
     if with_graph:
-        from ..graph.store import GraphStore
+        from ..graph.store_qdrant import GraphStoreQdrant
         from ..graph.build import build_graph
-        gs = GraphStore()
+        gs = GraphStoreQdrant()
         gs.clear_part(part)
         n_edges = build_graph(part, cards, pins, prose_blocks,
                               graph_store=gs, verbose=True)

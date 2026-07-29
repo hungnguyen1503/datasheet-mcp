@@ -26,6 +26,43 @@ def _clean(text: str) -> str:
     return text.strip()
 
 
+def _classify_content_type(heading: str) -> str:
+    """Classify a prose block's content type based on its heading text.
+
+    Returns one of: "operation", "spec", "order", "general".
+    """
+    h = heading.lower()
+    # Operation/procedure sections
+    if any(kw in h for kw in (
+        "operation", "operating", "initializ", "configur",
+        "sequence", "procedure", "startup", "start-up",
+        "power-up", "power up", "setup", "set up",
+        "read", "write", "command",
+    )):
+        return "operation"
+    # Spec/characteristic sections
+    if any(kw in h for kw in (
+        "specification", "electrical characteristic",
+        "absolute maximum", "recommended operating",
+        "dc characteristic", "timing characteristic",
+        "ac characteristic", "power consumption",
+        "supply current", "operating condition",
+        "performance", "reliability", "rating",
+        "parameter", "characteristics",
+    )):
+        return "spec"
+    # Ordering/part-number sections
+    if any(kw in h for kw in (
+        "ordering", "part number", "ordering information",
+        "package code", "part family", "order code",
+        "how to order", "part marking",
+        "package dimension", "package type",
+        "available options", "ordering guide",
+    )):
+        return "order"
+    return "general"
+
+
 def extract_prose(part: str, *, vendor: str = "", revision: str = "") -> list[ProseBlock]:
     blocks: list[ProseBlock] = []
     for sec in iter_sections(part):
@@ -46,6 +83,7 @@ def extract_prose(part: str, *, vendor: str = "", revision: str = "") -> list[Pr
                     heading=heading,
                     breadcrumb=f"{part} > {blk} > {heading}",
                     text=body,
+                    content_type=_classify_content_type(heading),
                     revision=revision,
                 ))
 

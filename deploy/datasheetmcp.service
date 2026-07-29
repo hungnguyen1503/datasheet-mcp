@@ -1,0 +1,16 @@
+[Unit]
+Description=Datasheet MCP server (FastMCP, streamable-http)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hungnguyen
+WorkingDirectory=/home/hungnguyen/datasheet-mcp/mcp
+EnvironmentFile=/home/hungnguyen/datasheet-mcp/mcp/.env
+ExecStart=/home/hungnguyen/datasheet-mcp/.venv/bin/python server.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

@@ -14,15 +14,45 @@ every path is token-bounded, so responses stay small by construction.
 
 from __future__ import annotations
 
+import os
 import re
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
+from functools import lru_cache
 
-from .index.registers import RegisterStore
-from .index.pins import PinStore
+from .index.regstore_qdrant import RegisterStoreQdrant
 from .cards import render_card, render_bit
 from .router import classify_query
 from . import tokens
+
+_SEARCH_POOL = ThreadPoolExecutor(max_workers=6, thread_name_prefix="ds-search")
+
+
+def _build_footer(
+    kind: str,
+    n_tokens: int,
+    sources: list[str] | None = None,
+    truncated: bool = False,
+    confidence: str | None = None,
+) -> str:
+    """Append structured metadata footer for agent self-audit.
+
+    Gives the agent three signals:
+    - What kind of result this is (register / bit / search / miss / operation / pin / graph)
+    - Source provenance so it can verify claims
+    - Token count so it knows whether content was truncated
+    """
+    parts = [kind]
+    if confidence:
+        parts.append(confidence)
+    if sources:
+        short = [s[:77] + "..." if len(s) > 80 else s for s in sources[:3]]
+        parts.append(f"Sources: {'; '.join(short)}")
+    parts.append(f"Tokens: {n_tokens}")
+    if truncated:
+        parts.append("TRUNCATED -- increase max_tokens for full content")
+    return f"\n\n[Result: {' | '.join(parts)}]"
 
 
 @dataclass
@@ -33,23 +63,38 @@ class DSResult:
     n_tokens: int = 0
     sources: list[str] = field(default_factory=list)
     truncated: bool = False
+    confidence: str | None = None
 
     def __str__(self) -> str:
         return self.text
+
+    @property
+    def footer(self) -> str:
+        return _build_footer(
+            kind=self.kind,
+            n_tokens=self.n_tokens,
+            sources=self.sources,
+            truncated=self.truncated,
+            confidence=self.confidence,
+        )
 
 
 class DS:
     """Facade over the Qdrant register/pin stores, prose index, and graph."""
 
     def __init__(self, *, with_prose: bool = True):
-        self.store = RegisterStore()
-        self.pins = PinStore()
+        url = os.environ.get("QDRANT_URL", "http://localhost:6333")
+        api_key = os.environ.get("QDRANT_API_KEY") or None
+
+        self.store = RegisterStoreQdrant(url=url, api_key=api_key)
         self._with_prose = with_prose
         self._prose = None
         self._prose_lock = threading.Lock()
         self._prose_loading = False
         self._graph = None
         self._graph_lock = threading.Lock()
+        self._search_cache: dict[tuple, DSResult] = {}
+        self._cache_lock = threading.Lock()
 
     # ── lazy prose index ──────────────────────────────────────────────────
 
@@ -58,8 +103,10 @@ class DS:
         if self._prose is None and self._with_prose:
             with self._prose_lock:
                 if self._prose is None:
-                    from .index.prose import ProseIndex
-                    self._prose = ProseIndex()
+                    from .index.prose_qdrant import ProseIndexQdrant
+                    url = os.environ.get("QDRANT_URL", "http://localhost:6333")
+                    api_key = os.environ.get("QDRANT_API_KEY") or None
+                    self._prose = ProseIndexQdrant(url=url, api_key=api_key)
         return self._prose
 
     def _trigger_prose_load(self) -> None:
@@ -72,8 +119,10 @@ class DS:
 
         def _load():
             try:
-                from .index.prose import ProseIndex
-                prose = ProseIndex()
+                from .index.prose_qdrant import ProseIndexQdrant
+                url = os.environ.get("QDRANT_URL", "http://localhost:6333")
+                api_key = os.environ.get("QDRANT_API_KEY") or None
+                prose = ProseIndexQdrant(url=url, api_key=api_key)
                 with self._prose_lock:
                     self._prose = prose
             except Exception:
@@ -88,8 +137,10 @@ class DS:
         if self._graph is None:
             with self._graph_lock:
                 if self._graph is None:
-                    from .graph.store import GraphStore
-                    self._graph = GraphStore()
+                    from .graph.store_qdrant import GraphStoreQdrant
+                    url = os.environ.get("QDRANT_URL", "http://localhost:6333")
+                    api_key = os.environ.get("QDRANT_API_KEY") or None
+                    self._graph = GraphStoreQdrant(url=url, api_key=api_key)
         return self._graph
 
     # ── 1. exact register ─────────────────────────────────────────────────
@@ -147,8 +198,16 @@ class DS:
 
     def search(
         self, part: str, query: str, *, block: str | None = None,
-        k: int = 5, max_tokens: int = 1500,
+        k: int = 5, max_tokens: int = 1500, content_type: str | None = None,
     ) -> DSResult:
+        """Hybrid search. content_type filters by prose classification."""
+        cache_key = (part.upper(), query, block or "", k, content_type or "")
+        with self._cache_lock:
+            cached = self._search_cache.get(cache_key)
+            if cached is not None:
+                return cached
+
+        # Register hits (dense vector search)
         reg_hits = self.store.search_registers(part, query, limit=3)
         blocks: list[str] = []
         sources: list[str] = []
@@ -156,12 +215,13 @@ class DS:
             blocks.append(render_card(c, bits=False))
             sources.append(c.key)
 
+        # Prose hits (hybrid dense + sparse, with content_type filter)
         prose = self._prose
         if prose is not None:
             if block:
-                prose_results = prose.search(part, query, block=block, k=k)
+                prose_results = prose.search(part, query, block=block, k=k, content_type=content_type)
             else:
-                prose_results = prose.search_groups(part, query, k=k, group_size=2)
+                prose_results = prose.search_groups(part, query, k=k, group_size=2, content_type=content_type)
             for r in prose_results:
                 blocks.append(f"[{r['breadcrumb']}]\n{r['text']}")
                 sources.append(f"{r['part']}/{r['block']}::{r['heading']}")
@@ -173,22 +233,40 @@ class DS:
             )
 
         if not blocks:
-            return DSResult(text=f"No results for '{query}' on {part}.", kind="miss", part=part)
+            result = DSResult(text=f"No results for '{query}' on {part}.", kind="miss", part=part)
+            with self._cache_lock:
+                self._search_cache[cache_key] = result
+            return result
 
         text, n = tokens.pack(blocks, max_tokens)
         result = DSResult(text=text, kind="search", part=part,
                           n_tokens=tokens.count(text), sources=sources[:n],
                           truncated=n < len(blocks))
-        return self._enrich_with_dep_hint(result, part)
+        result = self._enrich_with_dep_hint(result, part)
+
+        # Cache (max 128 entries)
+        with self._cache_lock:
+            if len(self._search_cache) >= 128:
+                # Evict oldest
+                self._search_cache.pop(next(iter(self._search_cache)))
+            self._search_cache[cache_key] = result
+        return result
+
+    def search_spec(self, part: str, query: str, *, block: str | None = None,
+                    k: int = 5, max_tokens: int = 1500) -> DSResult:
+        """Search only spec/characteristics sections."""
+        return self.search(part, query, block=block, k=k, max_tokens=max_tokens, content_type="spec")
+
+    def search_order(self, part: str, query: str, *, block: str | None = None,
+                     k: int = 5, max_tokens: int = 1500) -> DSResult:
+        """Search only ordering/part-number sections."""
+        return self.search(part, query, block=block, k=k, max_tokens=max_tokens, content_type="order")
 
     def _enrich_with_dep_hint(self, result: DSResult, part: str) -> DSResult:
         """Append a 'Depends on:' footer using one lightweight graph query."""
         if result.kind == "miss" or not result.sources:
             return result
 
-        # Parse block name from the top source.
-        #   Register key: VENDOR/PART/BLOCK/REGISTER  (len >= 4)
-        #   Prose   key:  PART/BLOCK::heading          (len == 2)
         blk: str | None = None
         for src in result.sources:
             parts = src.split("/")
@@ -221,9 +299,23 @@ class DS:
     # ── 4. operation sections ─────────────────────────────────────────────
 
     def get_operation(self, part: str, block: str | None = None, *, max_tokens: int = 2000) -> DSResult:
-        rows = self.store.get_operation(part, block)
-        if not rows and block:
-            rows = self.store.get_operation(part, None)   # fall back to all op sections
+        """Return all content_type='operation' prose blocks for a part."""
+        # Use the prose index's search_by_content_type for ordered results
+        prose = self._prose
+        if prose is not None:
+            rows = prose.search_by_content_type(part, "operation", block=block)
+        else:
+            # Fall back to register store's get_operation (scrolls ds_prose)
+            rows = self.store.get_operation(part, block)
+
+        if not rows:
+            # Try block-less fallback
+            if block:
+                if prose:
+                    rows = prose.search_by_content_type(part, "operation")
+                else:
+                    rows = self.store.get_operation(part, None)
+
         if not rows:
             parts = [p for _, p, _ in self.store.list_parts()]
             if part not in parts:
@@ -247,13 +339,13 @@ class DS:
 
     def find_pin(self, part: str, *, block: str | None = None,
                  signal: str | None = None, max_tokens: int = 2000) -> DSResult:
-        rows = self.pins.find_pins(part, block=block, signal=signal)
+        rows = self.store.find_pins(part, block=block, signal=signal)
         if not rows:
             parts = [p for _, p, _ in self.store.list_parts()]
             if part not in parts:
                 return DSResult(text=f"Unknown part '{part}'. Indexed parts: {', '.join(parts)}.",
                                 kind="miss", part=part)
-            avail = self.pins.list_pin_blocks(part)
+            avail = self.store.list_pin_blocks(part)
             msg = f"No pin data for {part}"
             msg += f" / {block or signal}." if (block or signal) else "."
             if avail:
@@ -285,6 +377,10 @@ class DS:
             return self.get_operation(part, kw.get("block"))
         if route == "pin":
             return self.find_pin(part, block=kw.get("block"))
+        if route == "spec":
+            return self.search_spec(part, query, block=block, k=k, max_tokens=max_tokens)
+        if route == "order":
+            return self.search_order(part, query, block=block, k=k, max_tokens=max_tokens)
         if route == "register":
             return self.lookup_register(part, kw["register"], block=block, max_tokens=max_tokens)
         if route == "bit":

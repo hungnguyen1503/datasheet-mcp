@@ -1,9 +1,9 @@
-lancedb>=0.33           # local file-based vector DB — no server required
+qdrant-client>=1.9          # Qdrant vector DB client (shared with HUM/Schematic)
+fastembed>=0.3              # BM25 sparse embeddings for hybrid search
 sentence-transformers>=3.0
-pyarrow>=14.0           # LanceDB columnar storage
-mcp[cli]                # Anthropic MCP framework (FastMCP)
-python-dotenv           # load .env configuration
-tiktoken                # token counting / budgeting
-PyMuPDF>=1.24           # PDF bookmark text extraction (pymupdf fallback)
-beautifulsoup4>=4.12    # HTML cleanup in prose extraction
-InquirerPy>=0.3.4       # fuzzy TUI multi-select for PDF picker
+mcp[cli]                    # Anthropic MCP framework (FastMCP)
+python-dotenv               # load .env configuration
+tiktoken                    # token counting / budgeting
+PyMuPDF>=1.24               # PDF bookmark text extraction (pymupdf fallback)
+beautifulsoup4>=4.12        # HTML cleanup in prose extraction
+InquirerPy>=0.3.4           # fuzzy TUI multi-select for PDF picker

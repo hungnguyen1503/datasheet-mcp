@@ -1,8 +1,9 @@
 # 📋 Datasheet MCP Server
 
 > **Component Datasheet Understanding** — turns multi-page IC datasheet PDFs into
-> exact, part-scoped register and bit answers in ~250 tokens, served over the
-> Model Context Protocol. Runs **100 % locally** — no cloud server, no API key required.
+> exact, part-scoped register, spec, and pin answers in ~250 tokens, served over the
+> Model Context Protocol. Uses **Qdrant** hybrid vector search (shared with HUM MCP
+> and Schematic MCP), deployed via Cloudflare Tunnel.
 
 ---
 
@@ -14,8 +15,9 @@ git clone https://github.com/hungnguyen1503/datasheet-mcp.git
 cd datasheet-mcp
 pip install -r mcp/requirements.txt
 
-# 2. Register with your AI client — add to .mcp.json (replace the path):
-#    "ds": { "command": "python", "args": ["/path/to/datasheet-mcp/mcp/server.py"] }
+# 2. Register with your AI client — add to .mcp.json:
+#    "ds": { "url": "https://datasheetmcp.hungnguyenjx.space/mcp",
+#            "headers": { "Authorization": "Bearer <token>" } }
 
 # 3. Start querying — pre-indexed parts are ready immediately:
 #    ds_auto("ADXL345", "how do I configure the FIFO?")
@@ -29,7 +31,7 @@ To **add your own datasheet**, drop the PDF in a folder and run:
 python tools/ingest.py --pdf /path/to/YourPart.pdf
 ```
 
-That's it — the folder, markdown, and index are created automatically.
+That's it — the folder, markdown, and Qdrant index are created automatically.
 
 ---
 
@@ -45,18 +47,18 @@ graph TB
         MD[/"📁 data/PART/MD/<br/>chapter markdown"/]
         S2["⚙️ Stage 2<br/>Heuristic table parser<br/>extract_structured.py"]
         JSON[/"registers.json<br/>pins.json · catalog.json"/]
-        S3["⚙️ Stage 3<br/>build.bat<br/>embed + FTS index"]
+        S3["⚙️ Stage 3<br/>build.bat<br/>embed + push to Qdrant"]
     end
 
-    subgraph DB["🗄️ LanceDB  (local · data/.lancedb/)"]
-        R["ds_registers<br/>vector + FTS"]
-        P["ds_prose<br/>vector + FTS"]
-        PI["ds_pins<br/>filter"]
-        G["ds_graph<br/>edges"]
+    subgraph DB["🗄️ Qdrant  (remote · shared with HUM/Schematic)"]
+        R["ds_registers<br/>dense vector"]
+        P["ds_prose<br/>dense + sparse BM25<br/>RRF fusion"]
+        PI["ds_pins<br/>payload-only"]
+        G["ds_graph<br/>payload-only"]
     end
 
-    subgraph Server["⚡ MCP Server  (stdio)"]
-        SRV["mcp/server.py<br/>FastMCP"]
+    subgraph Server["⚡ MCP Server  (streamable-http)"]
+        SRV["mcp/server.py<br/>FastMCP · stateless_http"]
         TOOLS["6 ds_* tools"]
     end
 
@@ -70,81 +72,58 @@ graph TB
     MD --> S2 --> JSON --> S3
     MD -->|"prose blocks"| S3
     S3 -->|"registers · prose · pins · graph"| R & P & PI & G
-    R & P & PI & G -->|"local read"| SRV
+    R & P & PI & G -->|"query"| SRV
     SRV --> TOOLS -->|"tool calls"| CLI
 ```
 
 > **No CLIP, no visual search.** All retrieval is text-only — dense BGE vectors + BM25
-> FTS. The `hybrid-engine` label refers to MinerU's internal PDF parsing strategy
-> (text + layout + table VLM), **not** cross-modal image/text embedding.
+> sparse vectors with RRF fusion. The `hybrid-engine` label refers to MinerU's internal
+> PDF parsing strategy (text + layout + table VLM), **not** cross-modal image/text embedding.
 
 ### ✨ Search quality
 
-`ds_search` uses hybrid retrieval — dense cosine vectors + BM25 full-text fused with
-`LinearCombinationReranker` (70 % semantic + 30 % keyword). Keyword-exact and
-semantically-similar passages are ranked together in one pass.
+`ds_search` uses hybrid retrieval — dense cosine vectors + sparse BM25 fused with
+**RRF** (Reciprocal Rank Fusion). Keyword-exact and semantically-similar passages
+are ranked together in one pass.
 
 | Feature | Benefit |
 |---|---|
-| 🔀 Hybrid dense + BM25 vectors | Best result ranked first — symbol and meaning in one call |
+| 🔀 Hybrid dense + sparse BM25 with RRF | Best result ranked first — symbol and meaning in one call |
 | 🗂️ Block-diverse grouping | Results spread across functional blocks, not monopolised by one |
 | 🔍 Semantic register fuzzy match | "power on" finds `POWER_CTL` without knowing the exact symbol |
+| 🏷️ content_type filtering | `"operation"` / `"spec"` / `"order"` — precise retrieval by section type |
 | 🔁 Optional cross-encoder reranker | `DS_RERANKER_MODEL` boosts precision on ambiguous queries |
 | 🧩 Dependency graph | `ds_neighbors` traces what must be enabled before a register works |
 
 ---
 
-## ⚡ Connect a client
+## ☁️ Remote deployment
 
-The `.mcp.json` at the repo root is pre-configured for **stdio** (local) mode.
-Update the path to point at your local checkout.
+The server is deployed at **`https://datasheetmcp.hungnguyenjx.space/mcp`** via:
+
+- **systemd** service (`deploy/datasheetmcp.service`) — runs `mcp/server.py` with `streamable-http` transport
+- **Cloudflare Tunnel** (`deploy/docker-compose.yml`) — exposes `localhost:8060` securely
+- **Qdrant** — shared vector store at `localhost:6333` (same instance as HUM/Schematic MCP)
+- **Bearer-token auth** — optional, controlled via `DS_API_KEYS` env var
 
 ### 🤖 Claude Code
 
-Edit `.mcp.json` in your project root:
+The `.mcp.json` at the repo root is pre-configured for the **remote** cloudflared endpoint:
 
 ```json
 {
   "mcpServers": {
     "ds": {
-      "command": "python",
-      "args": ["/path/to/datasheet-mcp/mcp/server.py"]
+      "url": "https://datasheetmcp.hungnguyenjx.space/mcp",
+      "headers": {
+        "Authorization": "Bearer <your-token>"
+      }
     }
   }
 }
 ```
 
-> **Windows tip:** right-click `mcp/server.py` → *Copy as path*, then paste inside the JSON array.
-
-Run `claude` from the repo root. Approve the **ds** server when prompted.
-
----
-
-### 🖥️ Claude Desktop
-
-Edit `claude_desktop_config.json` (Settings → Developer → Edit Config):
-
-- **Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
-- **macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
-
-```json
-{
-  "mcpServers": {
-    "ds": {
-      "command": "python",
-      "args": ["/path/to/datasheet-mcp/mcp/server.py"]
-    }
-  }
-}
-```
-
-Restart Claude Desktop — **ds** appears under the tools menu.
-
----
-
-### 🔧 Cursor / Cline / Continue
-
-Paste into the MCP settings UI or `cline_mcp_settings.json`:
+For **local dev**, use stdio mode instead:
 
 ```json
 {
@@ -166,7 +145,7 @@ Paste into the MCP settings UI or `cline_mcp_settings.json`:
 | Tool | Args | What it does |
 |---|---|---|
 | `ds_auto` | `part`, `query` | 🚦 **Start here** — auto-routes every query to the right backend |
-| `ds_search` | `part`, `query` | 🔍 Hybrid search for specs, values, overviews; add `operation_only=True` for ordered init/procedure sections |
+| `ds_search` | `part`, `query`, `content_type` | 🔍 Hybrid search; `content_type="operation"` for procedures, `"spec"` for electrical/timing specs, `"order"` for part numbers |
 | `ds_lookup_register` | `part`, `register` | 📄 Full register card (addresses + bit fields); add `bit=` for a single bit/field row |
 | `ds_find_pin` | `part` | 📌 Full pinout — signal names, I/O types, descriptions |
 | `ds_neighbors` | `part`, `node` | 🧩 Dependency graph — what a block or register depends on |
@@ -175,33 +154,35 @@ Paste into the MCP settings UI or `cline_mcp_settings.json`:
 > ⚠️ **`part` is required on every call except `ds_list()`.** This prevents identically
 > named registers on different ICs from ever mixing up their data.
 
-**📋 Typical workflow:**
+### `ds_search` content_type modes
 
-```
-1. ds_list()                          → confirm the part name is indexed
-2. ds_auto("ADXL345", "how to init")  → get started with the init sequence
-3. ds_lookup_register("ADXL345", "POWER_CTL")         → inspect a register
-4. ds_lookup_register("ADXL345", "POWER_CTL", bit="MEASURE")  → single bit
-5. ds_search("ADXL345", "supply voltage range")        → spec questions
-6. ds_find_pin("ADXL345")             → pinout
-7. ds_neighbors("ADXL345", "FIFO")    → block dependencies
-```
+| content_type | Use for | Example queries |
+|---|---|---|
+| `""` (default) | All content — hybrid vector + BM25 | "what is the FIFO mode?", "output data rate" |
+| `"operation"` | Init / procedure / how-to | "how to configure FIFO", "power-up sequence" |
+| `"spec"` | Electrical / timing / ratings | "supply voltage range", "I2C timing", "absolute maximum" |
+| `"order"` | Part numbers / packages / ordering | "available package options", "ordering codes" |
 
 ### Query routing inside `ds_auto`
 
 ```mermaid
 flowchart LR
-    Q(["user query"]) --> R1{"procedural keyword?\nhow to · configure\nenable · sequence\nstartup · power-up"}
-    R1 -- Yes --> OP["ds_search\noperation_only=True\n⟶ block"]
+    Q(["user query"]) --> R1{"procedural keyword?\nhow to · configure\nenable · sequence"}
+    R1 -- Yes --> OP["ds_search\ncontent_type='operation'"]
 
     R1 -- No --> R2{"pin keyword?\npinout · SDA · SCL\nwhich pin · pad"}
-    R2 -- Yes --> PIN["ds_find_pin\n⟶ block / signal"]
+    R2 -- Yes --> PIN["ds_find_pin"]
 
-    R2 -- No --> R3{"ALLCAPS\nregister token?"}
-    R3 -- "value keyword\nvoltage · spec · range" --> SRCH["ds_search\nhybrid semantic + BM25"]
-    R3 -- "bit context\nX bit in Y" --> BIT["ds_lookup_register\n⟶ register + bit"]
-    R3 -- "register only" --> REG["ds_lookup_register\n⟶ register"]
-    R3 -- No --> SRCH
+    R2 -- No --> R3{"spec keyword?\nsupply voltage · timing\nabsolute maximum"}
+    R3 -- Yes --> SPEC["ds_search\ncontent_type='spec'"]
+
+    R3 -- No --> R4{"order keyword?\npart number · package\nordering · marking"}
+    R4 -- Yes --> ORDER["ds_search\ncontent_type='order'"]
+
+    R4 -- No --> R5{"ALLCAPS\nregister token?"}
+    R5 -- "register" --> REG["ds_lookup_register"]
+    R5 -- "bit context" --> BIT["ds_lookup_register + bit"]
+    R5 -- No --> SRCH["ds_search\nhybrid semantic + BM25"]
 ```
 
 ---
@@ -209,8 +190,7 @@ flowchart LR
 ## 📦 Adding a new datasheet
 
 > **No LLM required.** Stage 2 uses a heuristic markdown-table parser.
-> No LMStudio, Ollama, or API key needed. `pip install InquirerPy` adds a
-> fuzzy TUI selector (optional — numbered fallback is built-in).
+> No LMStudio, Ollama, or API key needed.
 
 ### Step 1 — Ingest with the unified CLI (recommended)
 
@@ -222,128 +202,26 @@ python tools/ingest.py --pdf LM358.pdf --backend pymupdf  # CPU-only, no MinerU 
 # Other flags: --no-prose  --no-graph  --no-extract  --reset
 ```
 
-**⏱️ How long does it take?** (per part, typical 30–50 page datasheet)
-
-| Path | Stage 1 | Stage 2 | Stage 3 (embed) | Total |
-|---|---|---|---|---|
-| GPU + MinerU hybrid-engine | ~1–2 min | ~2 s | ~20–30 s | **~2–3 min** |
-| CPU + MinerU pipeline | ~3–5 min | ~2 s | ~60–90 s | **~5–7 min** |
-| CPU + PyMuPDF (`--backend pymupdf`) | ~5–10 s | ~2 s | ~60–90 s | **~1–2 min** |
-
-> **About MinerU `hybrid-engine` and VLM:** When CUDA is available, Stage 1 uses
-> MinerU's `hybrid-engine` mode which has a built-in VLM to recognise table structure
-> and figures inside the PDF. This is MinerU's own internal model — datasheetMCP does
-> **not** run a separate Qwen caption step (`caption_tiles.py` belongs to SchematicMCP).
-> On CPU, `pipeline` mode is selected automatically: pure text extraction, no VLM,
-> no GPU required. There is **no CLIP** or visual embedding anywhere in this project.
-
-**What happens under the hood:**
-
-```mermaid
-sequenceDiagram
-    participant U as You
-    participant I as tools/ingest.py
-    participant M as MinerU / PyMuPDF
-    participant P as Heuristic Parser
-    participant DB as LanceDB
-
-    U->>I: python tools/ingest.py --dir /pdfs
-    I->>U: fuzzy multi-select TUI
-    U->>I: ✓ ADXL345.pdf  ✓ LM358.pdf
-
-    I->>I: create data/ADXL345/source.pdf
-    Note over I,M: Stage 1 — GPU → hybrid-engine, CPU → pipeline (auto)
-    I->>M: extract markdown from PDF
-    M-->>I: data/ADXL345/MD/01_Features/ …
-
-    Note over I,P: Stage 2 — column-header pattern matching (instant, no LLM)
-    I->>P: parse register / pin tables
-    P-->>I: registers.json  pins.json  catalog.json
-
-    Note over I,DB: Stage 3 — embed + build vector + FTS indexes
-    I->>DB: upsert to ds_registers · ds_prose · ds_pins · ds_graph
-    DB-->>I: done
-
-    I->>U: ✅ 2 parts indexed — start mcp/server.py
-```
-
 ### Step 2 — Manual stage-by-stage (alternative)
 
 ```bash
 # Stage 1: PDF → chapter markdown
-#   GPU: MinerU hybrid-engine (understands table structure via VLM)
-#   CPU: MinerU pipeline (text-only, auto-selected, fast)
 python tools/pdf_to_md.py --pdf /downloads/ADXL345.pdf
-# → data/ADXL345/source.pdf  +  data/ADXL345/MD/NN_Section/…
 
 # Stage 2: heuristic table extraction (no LLM — instant, deterministic)
 python tools/extract_structured.py --part ADXL345
-# → data/ADXL345/registers.json  pins.json  catalog.json
 
-# Stage 3: embed + index into LanceDB
+# Stage 3: embed + push to Qdrant
 cd mcp
-build.bat --part ADXL345           # Windows
-bash build.sh --part ADXL345       # Linux / macOS
-
-# Re-index after switching embedding model:
-build.bat --part ADXL345 --reset
+build.bat --part ADXL345        # Windows
+bash build.sh --part ADXL345    # Linux / macOS
 ```
 
 ### Step 3 — Verify
 
 ```bash
-cd datasheet-mcp
-
-python -m pytest tests/ -q                  # 160 unit tests, ~0.4 s
-python mcp/server.py                         # server starts — Ctrl+C to stop
-```
-
-Then in Claude Code or the MCP Inspector:
-
-```
-ds_list()                                    # ADXL345 should appear
-ds_list("ADXL345")                           # check block list
-ds_lookup_register("ADXL345", "POWER_CTL") # spot-check a register
-```
-
----
-
-## 🔍 Verify extraction quality
-
-After ingestion, check `registers.json` — if a register you expect is missing, the
-table's column headers did not match the heuristic patterns.
-
-| Situation | Action |
-|---|---|
-| ✅ Standard headers (`Bit`, `Symbol`, `R/W`, `Description`) | Works automatically |
-| ⚠️ Non-English or unusual headers | Table is skipped but still in `ds_prose` — `ds_search` still finds it |
-| ⚠️ Register count is 0 | Run `python tools/extract_structured.py --part <P>` and inspect output |
-| 🔧 Register address not captured | Check that the heading above the table contains a hex address like `(0x2D)` |
-
----
-
-## 🔧 Maintenance
-
-**♻️ Re-index a part after editing extraction:**
-
-```bash
-cd datasheet-mcp
-python tools/extract_structured.py --part ADXL345 --reset
-cd mcp && build.bat --part ADXL345 --reset
-```
-
-**🧪 Run the tests:**
-
-```bash
-cd datasheet-mcp
-python -m pytest tests/ -v
-```
-
-**🗑️ Remove a part entirely:**
-
-```bash
-cd datasheet-mcp/mcp
-python -c "from ds.db import get_db; db=get_db(); [db.open_table(t).delete(\"part='ADXL345'\") for t in db.list_tables()]"
+python -m pytest tests/ -q                  # unit tests
+DS_TRANSPORT=stdio python mcp/server.py      # local test — Ctrl+C to stop
 ```
 
 ---
@@ -352,23 +230,16 @@ python -c "from ds.db import get_db; db=get_db(); [db.open_table(t).delete(\"par
 
 Copy `mcp/.env.example` to `mcp/.env` and adjust as needed.
 
-```bash
-cd datasheet-mcp
-cp mcp/.env.example mcp/.env
-```
-
 | Variable | Default | Purpose |
 |---|---|---|
-| `DS_DB_PATH` | `data/.lancedb` | LanceDB storage directory (relative to repo root) |
+| `DS_TRANSPORT` | `streamable-http` | MCP transport: `stdio` / `streamable-http` |
+| `DS_HOST` | `127.0.0.1` | Host for HTTP transport |
+| `DS_PORT` | `8060` | Port for HTTP transport |
+| `QDRANT_URL` | `http://localhost:6333` | Qdrant server URL |
+| `QDRANT_API_KEY` | *(set in deploy)* | Qdrant API key |
+| `DS_API_KEYS` | *(unset)* | Comma-separated bearer tokens for HTTP auth |
 | `DS_EMBED_MODEL` | `BAAI/bge-small-en-v1.5` | Sentence-transformers model (384-dim, CPU-friendly) |
-| `DS_EMBED_DEVICE` | auto (`cuda` → `cpu`) | Embedding device override |
-| `DS_EMBED_BATCH_SIZE` | 256 GPU / 32 CPU | Reduce to 16 on low-RAM machines |
-| `DS_RERANKER_MODEL` | *(unset)* | Optional cross-encoder, e.g. `cross-encoder/ms-marco-MiniLM-L-6-v2` |
-| `DS_TRANSPORT` | `stdio` | MCP transport: `stdio` / `streamable-http` / `sse` |
-| `DS_HOST` | `0.0.0.0` | Host for HTTP transport |
-| `DS_PORT` | `8002` | Port for HTTP transport |
-| `DS_API_KEYS` | *(unset)* | Comma-separated bearer tokens — enables auth for HTTP mode |
-| `MINERU_DEVICE_MODE` | auto | MinerU device override: `cuda` / `cpu` |
+| `DS_RERANKER_MODEL` | `cross-encoder/ms-marco-MiniLM-L-6-v2` | Optional cross-encoder reranker |
 
 ### Embedding model options
 
@@ -378,36 +249,19 @@ cp mcp/.env.example mcp/.env
 | `BAAI/bge-base-en-v1.5` | 768 | ~440 MB | CPU with ≥ 16 GB RAM |
 | `BAAI/bge-large-en-v1.5` | 1024 | ~1.3 GB | GPU recommended |
 
-> After changing `DS_EMBED_MODEL`, re-run `build.bat --part <P> --reset` to rebuild
-> the vector index with the new dimensions.
-
-### 🔐 Access control (HTTP mode only)
-
-HUM-style static bearer-token auth — only needed when `DS_TRANSPORT=streamable-http`.
-
-1. Generate a token:
-   ```bash
-   python3 -c "import secrets; print(secrets.token_hex(32))"
-   ```
-2. Add it to `mcp/.env`:
-   ```
-   DS_API_KEYS=token1here,token2here
-   ```
-3. Restart the server.
-4. Clients add a header: `Authorization: Bearer <your-token>`
-
-> 🔓 When `DS_API_KEYS` is unset the server runs in **open mode** — fine for local use.
+> After changing `DS_EMBED_MODEL`, drop and rebuild the Qdrant collections with the new dimensions.
 
 ---
 
-## 🗄️ LanceDB tables
+## 🗄️ Qdrant collections
 
-| Table | Vectors | FTS | Key fields | Used by |
+| Collection | Vectors | Indexes | Key fields | Used by |
 |---|---|---|---|---|
-| `ds_registers` | dense 384-dim | `register`, `name` | vendor, part, block, register, bitfields (JSON), addresses (JSON) | `ds_lookup_register`, `ds_search` |
-| `ds_prose` | dense 384-dim | `text`, `heading`, `breadcrumb` | part, block, section, is_operation | `ds_search`, `ds_search(operation_only=True)` |
-| `ds_pins` | none | none | part, block, pin, signal, type, description | `ds_find_pin` |
-| `ds_graph` | none | none | part, edge_type, source_id, target_id, label, weight | `ds_neighbors` |
+| `ds_registers` | dense 384-dim | KEYWORD: part, block; TEXT: register, name | vendor, part, block, register, bitfields (JSON) | `ds_lookup_register`, `ds_search` |
+| `ds_prose` | dense + sparse BM25 | KEYWORD: part, block, content_type | part, block, section, heading, breadcrumb, text, content_type | `ds_search` |
+| `ds_pins` | none (payload-only) | KEYWORD: part, block, signal | part, block, pin, signal, type, description | `ds_find_pin` |
+| `ds_graph` | none (payload-only) | KEYWORD: part, source_id, target_id, edge_type | part, edge_type, source_id, target_id, label, weight | `ds_neighbors` |
+| `ds_catalog` | none (payload-only) | KEYWORD: part, vendor | vendor, part, block, revision | `ds_list` |
 
 ---
 
@@ -415,7 +269,11 @@ HUM-style static bearer-token auth — only needed when `DS_TRANSPORT=streamable
 
 ```
 datasheet-mcp/
-├── .mcp.json                  ← Claude Code MCP registration
+├── .mcp.json                  ← Claude Code MCP registration (cloudflared URL)
+├── deploy/
+│   ├── docker-compose.yml     ← Cloudflared tunnel container
+│   ├── datasheetmcp.service   ← systemd service unit
+│   └── .env.example           ← Deployment env template
 ├── mcp/
 │   ├── server.py              ← MCP server entrypoint
 │   ├── build.bat / build.sh   ← Stage 3 build scripts (Windows / Linux)
@@ -427,32 +285,31 @@ datasheet-mcp/
 │       ├── router.py          ← regex query classifier
 │       ├── model.py           ← RegisterCard, Pin, ProseBlock, …
 │       ├── embed.py           ← GPU/CPU adaptive embedder
-│       ├── db.py              ← LanceDB connection singleton
+│       ├── collections.py     ← Qdrant collection prefix helper
 │       ├── catalog.py         ← part/section discovery
 │       ├── cards.py           ← register card renderer
-│       ├── index/             ← LanceDB table wrappers
-│       │   ├── registers.py
-│       │   ├── prose.py
-│       │   └── pins.py
+│       ├── index/             ← Qdrant store wrappers
+│       │   ├── regstore_qdrant.py  ← Register + catalog + pin store
+│       │   ├── prose_qdrant.py     ← Hybrid dense + sparse prose index
+│       │   └── pins_qdrant.py      ← Pin store wrapper
 │       ├── ingest/            ← ingestion pipeline
 │       │   ├── extract.py     ← heuristic table parser (no LLM)
-│       │   ├── prose.py       ← markdown → ProseBlock
-│       │   └── build.py       ← JSON → LanceDB orchestrator
+│       │   ├── prose.py       ← markdown → ProseBlock + content_type
+│       │   └── build.py       ← JSON → Qdrant orchestrator
 │       └── graph/             ← dependency graph
-│           ├── model.py · store.py · build.py · query.py
+│           ├── model.py · store_qdrant.py · build.py · query.py
 ├── tools/
 │   ├── ingest.py              ← unified CLI (fuzzy pick + all stages)
 │   ├── pdf_to_md.py           ← Stage 1: PDF → Markdown
 │   └── extract_structured.py  ← Stage 2: Markdown → JSON (heuristic)
 ├── data/
-│   ├── .lancedb/              ← LanceDB vector store (auto-created)
 │   └── ADXL345/               ← one folder per indexed part
 │       ├── source.pdf
 │       ├── MD/                ← MinerU markdown sections
 │       ├── registers.json      ← extracted by Stage 2 heuristic parser
 │       ├── pins.json
 │       └── catalog.json
-└── tests/                     ← 160 unit tests (no DB / LLM needed)
+└── tests/                     ← unit tests
 ```
 
 ---
@@ -463,10 +320,8 @@ datasheet-mcp/
 |---|---|
 | ❌ `ds_list()` returns empty | Parts not indexed — run `python tools/ingest.py` |
 | ❌ `MinerU not found` | `pip install mineru` or use `--backend pymupdf` |
-| ⚠️ `dim mismatch — recreating table` | `DS_EMBED_MODEL` changed — expected, table auto-rebuilds |
-| ⚠️ No results from `ds_lookup_register` | Register not extracted — check `data/<P>/registers.json`; table headers may be non-standard |
+| ❌ Cannot connect to Qdrant | Check `QDRANT_URL` in `mcp/.env`; ensure Qdrant is running on port 6333 |
+| ⚠️ No results from `ds_lookup_register` | Register not extracted — check `data/<P>/registers.json` |
 | ⚠️ `ds_search` returns empty on first call | Embedding model is still loading (~10 s). Retry for full results. |
-| ⚠️ `ds_search(operation_only=True)` returns nothing | No operation-heading text found — `ds_search` (default mode) still finds it |
-| ❌ No hybrid search results | FTS index not built — re-run `build.bat --part <P>` after data is added |
-| ⏱️ CPU indexing very slow | Reduce batch size: `DS_EMBED_BATCH_SIZE=16` in `mcp/.env` |
+| ⚠️ `ds_search(content_type="operation")` returns nothing | No operation-heading text found — try `content_type=""` |
 | ❌ Build fails: `No markdown found` | Stage 1 not run — run `python tools/pdf_to_md.py --part <P>` first |

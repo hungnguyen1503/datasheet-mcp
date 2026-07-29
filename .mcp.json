@@ -1,8 +1,10 @@
 {
   "mcpServers": {
     "ds": {
-      "command": "python",
-      "args": ["C:/Users/Admin/hungquangnguyen/03_AI/08_datasheetMCP/mcp/server.py"]
+      "url": "https://datasheetmcp.hungnguyenjx.space/mcp",
+      "headers": {
+        "Authorization": "Bearer b77a01caf551a28bae9a09ba4a268c72e6f58a1a87e8f74a3e08b49da4c733d5"
+      }
     }
   }
 }

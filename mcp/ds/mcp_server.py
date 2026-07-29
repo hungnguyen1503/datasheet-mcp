@@ -5,13 +5,16 @@ TOOL ROUTING POLICY (read before choosing a tool):
 
   ds_auto            → USE THIS when unsure which tool to call. Single entry
                         point that routes internally: register names, procedural
-                        questions, pin assignments, and general queries are all
-                        dispatched automatically to the correct backend.
+                        questions, pin assignments, spec lookups, ordering info,
+                        and general queries are all dispatched automatically to
+                        the correct backend.
 
   ds_search          → DEFAULT for any conceptual / value question:
                         supply voltage, sensitivity, package, bandwidth, overview,
                         spec tables, and dependency questions ("what enables X?").
-                        Set operation_only=True for init/procedure sections instead.
+                        Set content_type="operation" for init/procedure sections,
+                        content_type="spec" for electrical/timing specs,
+                        content_type="order" for ordering/part-number info.
 
   ds_lookup_register → ONLY when user explicitly names a register symbol OR a
                         bit/flag. Omit `bit` for full card; supply `bit` for one row.
@@ -27,7 +30,7 @@ TOOL ROUTING POLICY (read before choosing a tool):
 
 GLOBAL RULES:
   1. Use exactly ONE tool per query. One call, then stop.
-  2. Do NOT chain ds_search + ds_lookup_register + ds_search(operation_only=True).
+  2. Do NOT chain ds_search + ds_lookup_register + ds_search(content_type="operation").
   3. Never call ds_list automatically — only when the user explicitly asks.
 
 Run (stdio):  python mcp/server.py
@@ -37,16 +40,23 @@ Run (HTTP):   DS_TRANSPORT=streamable-http python mcp/server.py
 from __future__ import annotations
 
 import os
+import logging
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.auth.provider import TokenVerifier, AccessToken
 from mcp.server.auth.settings import AuthSettings
 
-from .query import DS
+from .query import DS, _build_footer
+
+_log = logging.getLogger(__name__)
 
 
 class _StaticBearerTokenVerifier(TokenVerifier):
-    """Accepts any token present in the DS_API_KEYS env var (comma-separated)."""
+    """Accepts any token present in the DS_API_KEYS env var (comma-separated).
+
+    When DS_API_KEYS is unset or empty the verifier is not installed and the
+    server runs in open mode (suitable for local / dev use).
+    """
 
     def __init__(self, tokens: set[str]) -> None:
         self._tokens = tokens
@@ -57,15 +67,15 @@ class _StaticBearerTokenVerifier(TokenVerifier):
         return None
 
 
-_transport = os.environ.get("DS_TRANSPORT", "stdio")
+_transport = os.environ.get("DS_TRANSPORT", "streamable-http")
 _host = os.environ.get("DS_HOST", "0.0.0.0")
-_port = int(os.environ.get("DS_PORT", "8002"))
+_port = int(os.environ.get("DS_PORT", "8060"))
 
 _raw_keys = os.environ.get("DS_API_KEYS", "")
 _api_keys = {t.strip() for t in _raw_keys.split(",") if t.strip()}
 
 if _api_keys:
-    _server_url = os.environ.get("DS_SERVER_URL", "https://datasheetmcp.example.com")
+    _server_url = os.environ.get("DS_SERVER_URL", "https://datasheetmcp.hungnguyenjx.space")
     _auth_settings: AuthSettings | None = AuthSettings(
         issuer_url=_server_url, resource_server_url=_server_url,
     )
@@ -80,7 +90,38 @@ mcp = FastMCP(
     port=_port,
     auth=_auth_settings,
     token_verifier=_token_verifier,
+    stateless_http=True,   # Each request is self-contained — no sessions needed.
 )
+
+# ASGI app for gunicorn/uvicorn (imported as ds.mcp_server:app)
+app = mcp.streamable_http_app()
+
+# ── Optional prefix middleware for future multi-tenant support ──────────
+from .collections import set_prefix
+
+
+class _PrefixMiddleware:
+    """Set collection prefix from bearer token before each request (async-safe ContextVar)."""
+
+    def __init__(self, asgi_app):
+        self._app = asgi_app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http":
+            headers = {}
+            for k, v in scope.get("headers", []):
+                headers[k] = v
+            auth = headers.get(b"authorization", b"").decode("latin-1")
+            token = auth.removeprefix("Bearer ").strip() if auth.lower().startswith("bearer ") else None
+            # Currently all tokens map to empty prefix (single namespace).
+            # Future: route specific tokens to "nightly_" prefix.
+            set_prefix("")
+        await self._app(scope, receive, send)
+
+
+app.add_middleware(_PrefixMiddleware)
+
+# ── Singleton DS instance ────────────────────────────────────────────────
 
 _ds: DS | None = None
 
@@ -92,7 +133,17 @@ def _d() -> DS:
     return _ds
 
 
-# ── Tool 1: catalog listing (merged ds_list_parts + ds_list_blocks) ───────────
+def _fmt(r) -> str:
+    """Wrap a DSResult with a structured metadata footer for agent self-audit.
+
+    For plain strings (ds_list), returns the string unchanged.
+    """
+    if not hasattr(r, "kind"):
+        return str(r)
+    return r.text + r.footer
+
+
+# ── Tool 1: catalog listing (merged ds_list_parts + ds_list_blocks) ───────
 
 @mcp.tool()
 def ds_list(part: str = "") -> str:
@@ -122,7 +173,7 @@ def ds_list(part: str = "") -> str:
     return d.list_blocks(part).text
 
 
-# ── Tool 2: register lookup ────────────────────────────────────────────────────
+# ── Tool 2: register lookup ──────────────────────────────────────────────
 
 @mcp.tool()
 def ds_lookup_register(
@@ -141,7 +192,7 @@ def ds_lookup_register(
       Examples: "what is the MEASURE bit?", "FULL_RES flag", "RANGE field"
 
     Do NOT use for value/overview questions (→ ds_search), procedures
-    (→ ds_search with operation_only=True), or pins (→ ds_find_pin).
+    (→ ds_search with content_type="operation"), or pins (→ ds_find_pin).
 
     Args:
         part: Part name, e.g. "ADXL345". Required.
@@ -152,11 +203,11 @@ def ds_lookup_register(
     """
     d = _d()
     if bit:
-        return d.lookup_bit(part, register, bit).text
-    return d.lookup_register(part, register, block=block or None, bits=bits).text
+        return _fmt(d.lookup_bit(part, register, bit))
+    return _fmt(d.lookup_register(part, register, block=block or None, bits=bits))
 
 
-# ── Tool 3: hybrid search + operation (merged ds_search + ds_get_operation) ───
+# ── Tool 3: hybrid search + operation + spec + order ─────────────────────
 
 @mcp.tool()
 def ds_search(
@@ -164,11 +215,12 @@ def ds_search(
     query: str,
     block: str = "",
     k: int = 5,
-    operation_only: bool = False,
+    max_tokens: int = 1500,
+    content_type: str = "",
 ) -> str:
-    """Hybrid semantic + BM25 search — two modes.
+    """Hybrid semantic + BM25 search with optional content-type filtering.
 
-    Mode 1 — Default (operation_only=False):
+    Mode 1 — content_type="" (default): All content types.
       Semantic + BM25 hybrid over all prose + register names.
       Use for ALL conceptual / value questions:
         - Electrical: "supply voltage range", "operating current"
@@ -176,33 +228,49 @@ def ds_search(
         - Features: "what does the MEASURE bit do", "self-test feature"
       Results include a "Depends on:" footer when graph edges exist.
 
-    Mode 2 — operation_only=True:
+    Mode 2 — content_type="operation":
       Returns initialization / procedure sections in document order.
       Use for HOW-TO questions:
         "how to configure FIFO", "startup sequence", "power-up procedure",
         "enable measurement mode", "SPI initialization steps".
-      When set, `query` is ignored — `block` narrows scope instead.
+
+    Mode 3 — content_type="spec":
+      Returns electrical specifications, timing characteristics, ratings.
+      Use for spec/parameter questions:
+        "supply voltage range", "operating current", "timing parameters",
+        "absolute maximum ratings", "DC characteristics".
+
+    Mode 4 — content_type="order":
+      Returns ordering information, part numbers, package codes.
+      Use for ordering/part-number questions:
+        "available part numbers", "package options", "ordering codes",
+        "temperature grades", "how to order".
 
     This tool is SUFFICIENT on its own for these questions.
-    Do NOT also call ds_lookup_register or ds_search(operation_only=True)
-    for the same question.
+    Do NOT also call ds_lookup_register for the same question.
 
     Prefer ds_auto over calling this directly.
 
     Args:
         part: Part name, e.g. "ADXL345". Required.
-        query: Natural-language question or keywords (ignored when operation_only=True).
+        query: Natural-language question or keywords.
         block: Optional block filter, e.g. "FIFO".
-        k: Number of prose passages (default 5). Ignored when operation_only=True.
-        operation_only: True → return ordered init/procedure sections (no vector search).
+        k: Number of prose passages (default 5).
+        max_tokens: Output token budget (default 1500).
+        content_type: "" (all) | "operation" | "spec" | "order".
     """
     d = _d()
-    if operation_only:
-        return d.get_operation(part, block or None).text
-    return d.search(part, query, block=block or None, k=k).text
+    ct = content_type.strip().lower() if content_type else None
+    if ct == "operation":
+        return _fmt(d.get_operation(part, block or None, max_tokens=max_tokens))
+    if ct == "spec":
+        return _fmt(d.search_spec(part, query, block=block or None, k=k, max_tokens=max_tokens))
+    if ct == "order":
+        return _fmt(d.search_order(part, query, block=block or None, k=k, max_tokens=max_tokens))
+    return _fmt(d.search(part, query, block=block or None, k=k, max_tokens=max_tokens))
 
 
-# ── Tool 4: pin finder ─────────────────────────────────────────────────────────
+# ── Tool 4: pin finder ───────────────────────────────────────────────────
 
 @mcp.tool()
 def ds_find_pin(part: str, block: str = "", signal: str = "") -> str:
@@ -217,10 +285,10 @@ def ds_find_pin(part: str, block: str = "", signal: str = "") -> str:
         block: Optional — narrow to one functional block.
         signal: Optional — narrow to one signal/pad name, e.g. "SDA".
     """
-    return _d().find_pin(part, block=block or None, signal=signal or None).text
+    return _fmt(_d().find_pin(part, block=block or None, signal=signal or None))
 
 
-# ── Tool 5: dependency graph ───────────────────────────────────────────────────
+# ── Tool 5: dependency graph ─────────────────────────────────────────────
 
 @mcp.tool()
 def ds_neighbors(part: str, node: str, depth: int = 2) -> str:
@@ -235,10 +303,10 @@ def ds_neighbors(part: str, node: str, depth: int = 2) -> str:
         node: Block name ("FIFO"), register symbol ("POWER_CTL"), or node path.
         depth: Traversal depth, 1–3 (default 2).
     """
-    return _d().neighbors(part, node, depth=depth).text
+    return _fmt(_d().neighbors(part, node, depth=depth))
 
 
-# ── Tool 6: auto-router ────────────────────────────────────────────────────────
+# ── Tool 6: auto-router ──────────────────────────────────────────────────
 
 @mcp.tool()
 def ds_auto(part: str, query: str, block: str = "") -> str:
@@ -247,6 +315,8 @@ def ds_auto(part: str, query: str, block: str = "") -> str:
     Analyzes `query` and dispatches internally to the most appropriate backend:
     • Procedural question ("how to configure FIFO") → operation procedure
     • Pin question ("which pin is SDA") → pin/pad table
+    • Spec question ("supply voltage", "operating current") → spec search
+    • Ordering question ("part number", "package options") → order search
     • Named register/bit ("POWER_CTL", "MEASURE bit") → exact register card
     • Everything else → hybrid semantic + BM25 search
 
@@ -256,11 +326,48 @@ def ds_auto(part: str, query: str, block: str = "") -> str:
         block: Optional — narrows scope / resolves the target block for
                operation and pin routes when it cannot be extracted from the query.
     """
-    return _d().auto(part, query, block=block or None).text
+    return _fmt(_d().auto(part, query, block=block or None))
 
+
+# ── Main ─────────────────────────────────────────────────────────────────
 
 def main() -> None:
+    _prewarm()
+    # When running under gunicorn, the ASGI app (app) is served directly.
+    # Skip mcp.run() so the module-level startup runs but gunicorn owns the loop.
+    if os.environ.get("GUNICORN_RUN"):
+        return
     mcp.run(transport=_transport)
+
+
+def _prewarm() -> None:
+    """Pre-load heavy models so the first user request pays zero latency.
+
+    Runs before mcp.run(). Each step is wrapped so a failure never
+    prevents the server from starting (HUM pattern).
+    """
+    # 1. BGE dense embedder (~430 MB, 3-5s on CPU, 0.5s on GPU).
+    try:
+        d = _d()
+        _ = d.store.embedder   # triggers Embedder init
+        _log.info("prewarm: embedder + register store ready")
+    except Exception as exc:
+        _log.warning("prewarm: embedder failed to load (%s)", exc)
+
+    # 2. Prose index — load synchronously (BM25 sparse model + Qdrant check).
+    try:
+        _ = _d().prose
+        _log.info("prewarm: prose index ready")
+    except Exception as exc:
+        _log.warning("prewarm: prose index failed to load (%s)", exc)
+
+    # 3. Cross-encoder reranker (~24 MB, 1-3s on first load).
+    try:
+        from . import reranker as _rr
+        _rr._load_reranker()
+        _log.info("prewarm: reranker ready")
+    except Exception as exc:
+        _log.warning("prewarm: reranker failed to load (%s)", exc)
 
 
 if __name__ == "__main__":
