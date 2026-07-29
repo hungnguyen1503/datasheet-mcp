@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build helper: load mcp/.env, optionally drop ds_* LanceDB tables, then index a part.
+"""Build helper: load mcp/.env, optionally drop ds_* Qdrant collections, then index a part.
 
 Invoked by build.bat / build.sh.
 
@@ -26,31 +26,41 @@ except ImportError:
 os.environ.setdefault("PYTHONUTF8", "1")
 os.environ.setdefault("PYTHONIOENCODING", "utf-8")
 
-_TABLES = ["ds_registers", "ds_prose", "ds_pins", "ds_graph"]
+# Qdrant collection names (same as ds/collections.py)
+_PREFIX = os.environ.get("DS_COLLECTION_PREFIX", "")
+_COLLECTIONS = [f"{_PREFIX}ds_registers", f"{_PREFIX}ds_prose",
+                f"{_PREFIX}ds_pins", f"{_PREFIX}ds_graph",
+                f"{_PREFIX}ds_catalog"]
 
 
-def _reset_tables() -> None:
-    from ds.db import get_db
-    db = get_db()
-    existing = db.list_tables()
-    for tbl in _TABLES:
-        if tbl in existing:
-            db.drop_table(tbl)
-            print(f"  dropped {tbl}")
+def _reset_collections() -> None:
+    """Drop all ds_* Qdrant collections (idempotent)."""
+    from qdrant_client import QdrantClient
+
+    url = os.environ.get("QDRANT_URL", "http://localhost:6333")
+    api_key = os.environ.get("QDRANT_API_KEY") or None
+    client = QdrantClient(url=url, api_key=api_key, timeout=60)
+
+    for col in _COLLECTIONS:
+        try:
+            client.delete_collection(col)
+            print(f"  dropped {col}")
+        except Exception:
+            pass  # collection doesn't exist yet
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--part", required=True, help="Part name, e.g. ADXL345")
     ap.add_argument("--reset", action="store_true",
-                    help="Drop all ds_* tables first (needed when changing embed model)")
+                    help="Drop all ds_* Qdrant collections first (needed when changing embed model)")
     ap.add_argument("--no-prose", action="store_true")
     ap.add_argument("--no-graph", action="store_true")
     args = ap.parse_args()
 
     if args.reset:
-        print("Resetting LanceDB tables…")
-        _reset_tables()
+        print("Resetting Qdrant ds_* collections…")
+        _reset_collections()
 
     from ds.ingest.build import build_part
     build_part(args.part, with_prose=not args.no_prose, with_graph=not args.no_graph)
