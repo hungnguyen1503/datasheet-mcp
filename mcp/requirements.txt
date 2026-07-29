@@ -1,7 +1,7 @@
 qdrant-client>=1.9          # Qdrant vector DB client (shared with HUM/Schematic)
 fastembed>=0.3              # BM25 sparse embeddings for hybrid search
 sentence-transformers>=3.0
-mcp[cli]                    # Anthropic MCP framework (FastMCP)
+mcp[cli]>=1.12,<2.0         # Anthropic MCP framework (FastMCP) — v2.0 breaks API
 python-dotenv               # load .env configuration
 tiktoken                    # token counting / budgeting
 PyMuPDF>=1.24               # PDF bookmark text extraction (pymupdf fallback)

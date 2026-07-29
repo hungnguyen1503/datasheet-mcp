@@ -45,6 +45,7 @@ import logging
 from mcp.server.fastmcp import FastMCP
 from mcp.server.auth.provider import TokenVerifier, AccessToken
 from mcp.server.auth.settings import AuthSettings
+from mcp.server.transport_security import TransportSecuritySettings
 
 from .query import DS, _build_footer
 
@@ -84,12 +85,34 @@ else:
     _auth_settings = None
     _token_verifier = None
 
+# Transport security — allow the cloudflared domain + localhost
+def _transport_security() -> TransportSecuritySettings:
+    from urllib.parse import urlparse
+    hosts = {"localhost", "127.0.0.1", f"localhost:{_port}", f"127.0.0.1:{_port}"}
+    origins: set[str] = {f"http://localhost:{_port}", f"http://127.0.0.1:{_port}"}
+    su = os.environ.get("DS_SERVER_URL", "").strip()
+    if su:
+        p = urlparse(su)
+        if p.hostname:
+            hosts.add(p.hostname)
+            hosts.add(p.netloc)
+            origins.add(f"{p.scheme}://{p.netloc}")
+    extra = os.environ.get("DS_ALLOWED_HOSTS", "").strip()
+    if extra == "*":
+        return TransportSecuritySettings(enable_dns_rebinding_protection=False)
+    for h in extra.split(","):
+        if h.strip():
+            hosts.add(h.strip())
+    return TransportSecuritySettings(
+        allowed_hosts=sorted(hosts), allowed_origins=sorted(origins))
+
 mcp = FastMCP(
     "ds",
     host=_host,
     port=_port,
     auth=_auth_settings,
     token_verifier=_token_verifier,
+    transport_security=_transport_security(),
     stateless_http=True,   # Each request is self-contained — no sessions needed.
 )
 
