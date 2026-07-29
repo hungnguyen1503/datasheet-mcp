@@ -102,6 +102,16 @@ def build_part(
     rs.clear_part(part)
     for card in cards:
         rs.add_register(card)
+    # Always add a catalog entry, even if no registers were found
+    if meta and not cards:
+        rs._pending_cats.append({
+            "payload": {
+                "vendor":  meta.vendor or vendor,
+                "part":    part,
+                "block":   "GENERAL",
+                "revision": meta.revision or revision,
+            },
+        })
     # Pin data is also pushed through the same store
     rs.add_pins(pins)
     rs.commit()
