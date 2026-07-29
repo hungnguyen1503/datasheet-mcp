@@ -15,7 +15,7 @@ from .model import GraphEdge
 
 
 def _col(name: str) -> str:
-    from ...collections import get_prefix
+    from ds.collections import get_prefix
     return f"{get_prefix()}{name}"
 
 
