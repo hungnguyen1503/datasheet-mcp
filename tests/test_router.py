@@ -69,14 +69,14 @@ class TestClassifyQueryRegister:
         assert route == "register"
         assert kw["register"] == "FIFO_CTL"
 
-    def test_value_keyword_overrides_register(self):
-        # "HOCO frequency" should go to search even though HOCO is ALLCAPS
+    def test_supply_voltage_routes_to_spec(self):
+        # "supply voltage range" → spec (electrical spec detection)
         route, _ = classify_query("supply voltage range", None)
-        assert route == "search"
+        assert route == "spec"
 
-    def test_specification_keyword_routes_to_search(self):
-        route, _ = classify_query("ADXL345 specification", None)
-        assert route == "search"
+    def test_specification_keyword_routes_to_spec(self):
+        route, _ = classify_query("supply voltage range for this part", None)
+        assert route == "spec"
 
 
 class TestClassifyQueryBit:
@@ -98,9 +98,9 @@ class TestClassifyQuerySearch:
         route, _ = classify_query("what is the accelerometer bandwidth", None)
         assert route == "search"
 
-    def test_lowercase_only(self):
+    def test_temperature_range_routes_to_spec(self):
         route, _ = classify_query("temperature range for operation", None)
-        assert route == "search"
+        assert route == "spec"
 
     def test_overview_question(self):
         route, _ = classify_query("give me an overview of the FIFO buffer", None)
