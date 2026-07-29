@@ -12,7 +12,7 @@ import shutil
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-DATA_ROOT = REPO_ROOT / "data"
+DATA_ROOT = REPO_ROOT / "datasheet"
 
 
 def sanitize_part_name(name: str) -> str:

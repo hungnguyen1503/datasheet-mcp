@@ -25,7 +25,7 @@ from pathlib import Path
 # ds package lives at <repo>/mcp/ds/, so the repo root is three parents up and
 # the data corpus lives at <repo>/data.
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-DATA_ROOT = REPO_ROOT / "data"
+DATA_ROOT = REPO_ROOT / "datasheet"
 
 
 # ── per-part paths ─────────────────────────────────────────────────────────────
