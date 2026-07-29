@@ -19,7 +19,7 @@ from .model import (
     PROSE_REFERENCES_BLOCK,
     GraphEdge,
 )
-from .store import GraphStore
+from .store_qdrant import GraphStoreQdrant as GraphStore
 
 _DEPENDENCY = [BLOCK_DEPENDS_ON, REGISTER_ENABLES]
 _REFERENCE  = [PROSE_REFERENCES_REGISTER, PROSE_REFERENCES_BLOCK]

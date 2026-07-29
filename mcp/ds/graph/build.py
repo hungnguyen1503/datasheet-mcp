@@ -32,7 +32,7 @@ from .model import (
     BLOCK_DEPENDS_ON,
     REGISTER_ENABLES,
 )
-from .store import GraphStore
+from .store_qdrant import GraphStoreQdrant as GraphStore
 
 # ── Regex helpers ─────────────────────────────────────────────────────────────
 
