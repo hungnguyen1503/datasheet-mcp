@@ -1,0 +1,4 @@
+interface:
+  display_name: "Sync Datasheet Server"
+  short_description: "Deploy and sync the Datasheet MCP server"
+  default_prompt: "Use $sync-datasheet-server to deploy or synchronize Datasheet MCP safely."

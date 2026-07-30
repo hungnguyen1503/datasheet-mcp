@@ -1,74 +1,8 @@
-"""Orchestrate indexing of one part into LanceDB + the dependency graph.
-
-Reads two sources produced by earlier stages:
-  JSON (Stage 2)  — data/<part>/registers.json, pins.json, catalog.json
-  Markdown (Stage 1) — data/<part>/MD/**/*.md  (for prose + graph)
-
-Pushes to LanceDB:
-  1. ds_registers  ← RegisterCard objects (dense vector + FTS)
-  2. ds_pins       ← Pin objects (filter-only, no vector)
-  3. ds_prose      ← ProseBlocks from MinerU markdown (dense vector + FTS)
-  4. ds_graph      ← structural + reference + dependency edges (filter-only)
-
-Idempotent per part (each store clears the part before re-adding).
-"""
+"""Stable Stage 4 entry point for the canonical evidence index."""
 
 from __future__ import annotations
 
 import argparse
-import json
-from dataclasses import asdict
-
-from .. import catalog as _catalog
-from ..model import RegisterCard, BitField, Pin, PartMeta
-
-
-def _load_registers(part: str) -> tuple[list[RegisterCard], str, str]:
-    """Load registers.json; returns (cards, vendor, revision)."""
-    p = _catalog.registers_json(part)
-    if not p.exists():
-        return [], "", ""
-    raw = json.loads(p.read_text(encoding="utf-8"))
-    cards = []
-    vendor = ""
-    revision = ""
-    for r in raw:
-        bfs = [BitField(**b) for b in r.get("bitfields", [])]
-        addrs = [tuple(a) for a in r.get("addresses", [])]
-        card = RegisterCard(
-            vendor=r.get("vendor", ""),
-            part=r.get("part", part),
-            block=r.get("block", ""),
-            register=r.get("register", ""),
-            name=r.get("name", ""),
-            section=r.get("section", ""),
-            addresses=addrs,
-            bitfields=bfs,
-            notes=r.get("notes", ""),
-            revision=r.get("revision", ""),
-        )
-        cards.append(card)
-        if not vendor and card.vendor:
-            vendor = card.vendor
-        if not revision and card.revision:
-            revision = card.revision
-    return cards, vendor, revision
-
-
-def _load_pins(part: str) -> list[Pin]:
-    p = _catalog.pins_json(part)
-    if not p.exists():
-        return []
-    raw = json.loads(p.read_text(encoding="utf-8"))
-    return [Pin(**r) for r in raw]
-
-
-def _load_catalog(part: str) -> PartMeta | None:
-    p = _catalog.catalog_json(part)
-    if not p.exists():
-        return None
-    raw = json.loads(p.read_text(encoding="utf-8"))
-    return PartMeta(**raw)
 
 
 def build_part(
@@ -76,88 +10,33 @@ def build_part(
     *,
     with_prose: bool = True,
     with_graph: bool = True,
+    with_enrichment: bool = True,
 ) -> dict:
-    cards, vendor, revision = _load_registers(part)
-    pins = _load_pins(part)
-    meta = _load_catalog(part)
+    """Build the canonical evidence index for one part.
 
-    if not cards and not _catalog.md_dir(part).is_dir():
-        raise SystemExit(
-            f"No data for part '{part}'.\n"
-            f"Run: python tools/pdf_to_md.py --part {part}\n"
-            f"Then: python tools/extract_structured.py --part {part}"
-        )
-
-    if meta is None:
-        meta = PartMeta(part=part, vendor=vendor, revision=revision,
-                        blocks=[_catalog.block_title(s.section_name)
-                                for s in _catalog.iter_sections(part)])
-
-    print(f"  Part {part}: {len(cards)} registers, {len(pins)} pins, "
-          f"vendor={meta.vendor or '?'}, rev={meta.revision or '?'}")
-
-    # 1. Registers + catalog + pins
-    from ..index.regstore_qdrant import RegisterStoreQdrant
-    rs = RegisterStoreQdrant()
-    rs.clear_part(part)
-    for card in cards:
-        rs.add_register(card)
-    # Always add a catalog entry, even if no registers were found
-    if meta and not cards:
-        rs._pending_cats.append({
-            "payload": {
-                "vendor":  meta.vendor or vendor,
-                "part":    part,
-                "block":   "GENERAL",
-                "revision": meta.revision or revision,
-            },
-        })
-    # Pin data is also pushed through the same store
-    rs.add_pins(pins)
-    rs.commit()
-
-    # 2. Pins are now handled by RegisterStoreQdrant above
-
-    # 3 + 4. Prose + graph
-    prose_blocks = []
-    if with_prose or with_graph:
-        from .prose import extract_prose
-        prose_blocks = extract_prose(part, vendor=meta.vendor, revision=meta.revision)
-        print(f"  Prose: {len(prose_blocks)} blocks")
-
-    if with_prose:
-        from ..index.prose_qdrant import ProseIndexQdrant
-        pi = ProseIndexQdrant()
-        pi.clear_part(part)
-        pi.add_blocks(prose_blocks)
-        pi.flush()
-        pi.build_indexes()  # create FTS + vector ANN index after all data is loaded
-
-    n_edges = 0
-    if with_graph:
-        from ..graph.store_qdrant import GraphStoreQdrant
-        from ..graph.build import build_graph
-        gs = GraphStoreQdrant()
-        gs.clear_part(part)
-        n_edges = build_graph(part, cards, pins, prose_blocks,
-                              graph_store=gs, verbose=True)
-        print(f"  Graph: {n_edges} edges")
-
-    stats = {
-        "registers": len(cards), "pins": len(pins),
-        "prose": len(prose_blocks), "edges": n_edges,
-    }
-    print(f"  Done: {stats}")
-    return stats
+    ``with_prose`` and ``with_graph`` remain accepted for command compatibility,
+    but disabling either is rejected because evidence text and relationships are
+    required parts of the public query contract.
+    """
+    if not with_prose or not with_graph:
+        raise ValueError("The evidence index requires both prose and graph data")
+    from ..evidence.build import build_part as build_evidence_part
+    return build_evidence_part(part, with_enrichment=with_enrichment)
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Index a part into Qdrant + graph.")
     ap.add_argument("--part", required=True, help="Part name, e.g. ADXL345")
-    ap.add_argument("--no-prose", action="store_true", help="Skip prose index")
-    ap.add_argument("--no-graph", action="store_true", help="Skip graph build")
+    ap.add_argument("--no-prose", action="store_true", help="Deprecated; evidence requires prose")
+    ap.add_argument("--no-graph", action="store_true", help="Deprecated; evidence requires graph data")
+    ap.add_argument("--no-enrich", action="store_true", help="Skip local AI enrichment")
     args = ap.parse_args()
-    build_part(args.part, with_prose=not args.no_prose, with_graph=not args.no_graph)
+    build_part(
+        args.part,
+        with_prose=not args.no_prose,
+        with_graph=not args.no_graph,
+        with_enrichment=not args.no_enrich,
+    )
 
 
 if __name__ == "__main__":

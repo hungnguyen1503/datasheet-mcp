@@ -5,7 +5,7 @@ REM
 REM Usage:
 REM   build.bat --part ADXL345               index/refresh one part
 REM   build.bat --part ADXL345 --reset       DROP all ds_* collections then rebuild
-REM   build.bat --part ADXL345 --no-prose --no-graph   registers + pins only (fastest)
+REM   Prose and graph evidence are mandatory in the canonical index.
 
 setlocal
 cd /d "%~dp0"

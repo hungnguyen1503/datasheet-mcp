@@ -14,7 +14,7 @@ Env vars
 --------
 QDRANT_URL      (default http://localhost:6333)
 QDRANT_API_KEY  (optional)
-DS_EMBED_MODEL  (default BAAI/bge-small-en-v1.5, 384-dim)
+DS_EMBED_MODEL  (default BAAI/bge-base-en-v1.5, 768-dim)
 """
 
 from __future__ import annotations

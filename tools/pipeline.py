@@ -65,8 +65,10 @@ def main():
     ap.add_argument("--only", type=int, default=0, help="Run only this stage")
     ap.add_argument("--fresh", action="store_true", help="Delete sentinels and start fresh")
     ap.add_argument("--no-describe", action="store_true", help="Skip VLM descriptions")
-    ap.add_argument("--no-prose", action="store_true", help="Skip prose index")
-    ap.add_argument("--no-graph", action="store_true", help="Skip graph build")
+    ap.add_argument("--no-prose", action="store_true", help="Deprecated; evidence requires prose")
+    ap.add_argument("--no-graph", action="store_true", help="Deprecated; evidence requires graph data")
+    ap.add_argument("--no-enrich", action="store_true",
+                    help="Skip optional local semantic enrichment")
     ap.add_argument("--reset", action="store_true", help="Drop Qdrant collections")
     ap.add_argument("--mineru-backend", default="", choices=["", "hybrid-engine", "pipeline"])
     ap.add_argument("--workers", type=int, default=0)

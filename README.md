@@ -1,9 +1,8 @@
 # 📋 Datasheet MCP Server
 
-> **Component Datasheet Understanding** — turns multi-page IC datasheet PDFs into
-> exact, part-scoped register, spec, and pin answers in ~250 tokens, served over the
-> Model Context Protocol. Uses **Qdrant** hybrid vector search (dense BGE + sparse BM25
-> with RRF fusion), deployed via Cloudflare Tunnel.
+Turns multi-page IC datasheets into part-scoped, source-linked implementation
+evidence for embedded development. Tables, commands, modes, timing, operations,
+registers, pins, and graph relationships are retrieved with Qdrant hybrid search.
 
 ---
 
@@ -26,9 +25,9 @@ pip install -r mcp/requirements.txt
 # }
 
 # 3. Start querying:
-#    ds_auto("ADXL345", "how do I configure the FIFO?")
-#    ds_lookup_register("ADXL345", "POWER_CTL")
-#    ds_search("ADXL345", "supply voltage range", content_type="spec")
+#    ds_query("MX25LM51245G", "How do I configure SPI mode?")
+#    ds_query("MX25LM51245G", "Set dummy cycles for 133 MHz", focus="timing")
+#    ds_get("ADXL345", "POWER_CTL")
 ```
 
 To **add your own datasheet**, drop the PDF in a folder and run:
@@ -58,16 +57,14 @@ graph TB
     end
 
     subgraph DB["🗄️ Qdrant  (remote · shared instance)"]
-        R["ds_registers<br/>dense vector"]
-        P["ds_prose<br/>dense + sparse BM25<br/>RRF fusion"]
-        PI["ds_pins<br/>payload-only"]
-        G["ds_graph<br/>payload-only"]
-        C["ds_catalog<br/>payload-only"]
+        E["ds_evidence<br/>dense 768 + sparse BM25<br/>RRF fusion"]
+        G["ds_graph<br/>payload-only relations"]
+        C["ds_catalog<br/>payload-only coverage"]
     end
 
     subgraph Server["⚡ MCP Server  (streamable-http)"]
         SRV["mcp/server.py<br/>FastMCP · stateless_http"]
-        TOOLS["6 ds_* tools"]
+        TOOLS["3 ds_* tools"]
     end
 
     subgraph Clients["💬 MCP Clients"]
@@ -79,8 +76,8 @@ graph TB
     GPU -- "No"  --> S1P --> MD
     MD --> S2 --> JSON --> S4
     MD -->|"prose blocks"| S3 -->|"enriched markdown"| S4
-    S4 -->|"registers · prose · pins · graph"| R & P & PI & G & C
-    R & P & PI & G & C -->|"query"| SRV
+    S4 -->|"evidence · graph · coverage"| E & G & C
+    E & G & C -->|"query"| SRV
     SRV --> TOOLS -->|"tool calls"| CLI
 ```
 
@@ -131,28 +128,19 @@ flowchart LR
 
 ## 🛠️ The tools
 
-6 tools total. Always start with **`ds_auto`** — it routes to the correct backend automatically.
+Three tools cover discovery, implementation questions, and exact retrieval.
 
 | Tool | Args | What it does |
 |---|---|---|
-| `ds_auto` | `part`, `query` | 🚦 **Start here** — auto-routes every query: register names, procedures, pins, specs, ordering |
-| `ds_search` | `part`, `query`, `content_type` | 🔍 Hybrid search; `content_type="operation"` for procedures, `"spec"` for electrical/timing specs, `"order"` for part numbers |
-| `ds_lookup_register` | `part`, `register` | 📄 Full register card (addresses + bit fields); add `bit=` for a single bit/field row |
-| `ds_find_pin` | `part` | 📌 Full pinout — signal names, I/O types, descriptions |
-| `ds_neighbors` | `part`, `node` | 🧩 Dependency graph — what a block or register depends on |
-| `ds_list` | `[part]` | 📋 Omit `part` → list all indexed parts; supply `part` → list its blocks |
+| `ds_catalog` | `[part]`, `cursor`, `limit` | List parts or inspect one part's outline and extraction coverage |
+| `ds_query` | `part`, `question`, `focus`, `max_tokens` | Return normalized settings, ordered steps, exact facts, constraints, relations, sources, and explicit gaps |
+| `ds_get` | `part`, `target`, `relation_depth` | Resolve one exact ID/symbol/table/command/register and its bounded graph context |
 
-> ⚠️ **`part` is required on every call except `ds_list()`.** This prevents identically
+> ⚠️ **`part` is required on every call except `ds_catalog()`.** This prevents identically
 > named registers on different ICs from ever mixing up their data.
 
-### `ds_search` content_type modes
-
-| content_type | Use for | Example queries |
-|---|---|---|
-| `""` (default) | All content — hybrid vector + BM25 | "what is the FIFO mode?", "output data rate" |
-| `"operation"` | Init / procedure / how-to | "how to configure FIFO", "power-up sequence" |
-| `"spec"` | Electrical / timing / ratings | "supply voltage range", "I2C timing", "absolute maximum" |
-| `"order"` | Part numbers / packages / ordering | "available package options", "ordering codes" |
+`ds_query.focus` accepts `auto`, `configure`, `exact`, `operation`, `timing`, or
+`explain`. Query assembly is deterministic and reports incomplete evidence in `gaps`.
 
 ---
 
@@ -199,6 +187,12 @@ python tools/describe_images.py --part PartName
 
 # Stage 4: Index to Qdrant
 cd mcp && build.bat --part PartName
+
+# Artifact-only inspection; does not mutate Qdrant
+python tools/extract_evidence.py --part PartName --no-enrich
+
+# After indexing, run the golden retrieval/latency gates
+python tools/evaluate_retrieval.py --strict
 ```
 
 ### Resumability
@@ -227,7 +221,7 @@ python tools/pipeline.py --part ADXL345 --yes
 | `QDRANT_URL` | `http://localhost:6333` | Qdrant server URL |
 | `QDRANT_API_KEY` | *(set in deploy)* | Qdrant API key |
 | `DS_API_KEYS` | *(unset)* | Comma-separated bearer tokens for HTTP auth |
-| `DS_EMBED_MODEL` | `BAAI/bge-small-en-v1.5` | Sentence-transformers model (384-dim) |
+| `DS_EMBED_MODEL` | `BAAI/bge-base-en-v1.5` | Sentence-transformers model (768-dim) |
 | `DS_RERANKER_MODEL` | `cross-encoder/ms-marco-MiniLM-L-6-v2` | Optional cross-encoder reranker |
 | `MINERU_DEVICE_MODE` | auto | MinerU device: `cuda` / `cpu` |
 
@@ -235,8 +229,8 @@ python tools/pipeline.py --part ADXL345 --yes
 
 | Model | Dim | Size | Best for |
 |---|---|---|---|
-| `BAAI/bge-small-en-v1.5` **(default)** | 384 | ~130 MB | Any CPU laptop |
-| `BAAI/bge-base-en-v1.5` | 768 | ~440 MB | CPU with ≥ 16 GB RAM |
+| `BAAI/bge-base-en-v1.5` **(default)** | 768 | ~440 MB | CPU with ≥ 16 GB RAM |
+| `BAAI/bge-small-en-v1.5` | 384 | ~130 MB | Requires a full collection rebuild |
 | `BAAI/bge-large-en-v1.5` | 1024 | ~1.3 GB | GPU recommended |
 
 ---
@@ -245,11 +239,9 @@ python tools/pipeline.py --part ADXL345 --yes
 
 | Collection | Vectors | Key fields | Used by |
 |---|---|---|---|
-| `ds_registers` | dense 384-dim | part, block, register, bitfields (JSON) | `ds_lookup_register`, `ds_search` |
-| `ds_prose` | dense + sparse BM25 | part, block, content_type, heading, text | `ds_search` |
-| `ds_pins` | payload-only | part, block, pin, signal, type | `ds_find_pin` |
-| `ds_graph` | payload-only | part, edge_type, source_id, target_id | `ds_neighbors` |
-| `ds_catalog` | payload-only | vendor, part, block, revision | `ds_list` |
+| `ds_evidence` | dense 768-dim + sparse BM25 | part, kind, title, values, table, provenance | `ds_query`, `ds_get` |
+| `ds_graph` | payload-only | part, relation, source_id, target_id | `ds_query`, `ds_get` |
+| `ds_catalog` | payload-only | part metadata, outline, extraction coverage | `ds_catalog` |
 
 ---
 
@@ -270,9 +262,8 @@ datasheet-mcp/
 │   ├── requirements.txt
 │   ├── .env.example
 │   └── ds/                    ← main Python package
-│       ├── mcp_server.py      ← FastMCP tool definitions (6 tools)
-│       ├── query.py           ← DS facade (lookup / search / auto)
-│       ├── router.py          ← regex query classifier
+│       ├── mcp_server.py      ← FastMCP tool definitions (3 tools)
+│       ├── evidence/          ← lossless parser, store, graph, service contracts
 │       ├── model.py           ← RegisterCard, Pin, ProseBlock, …
 │       ├── embed.py           ← GPU/CPU adaptive embedder
 │       ├── collections.py     ← Qdrant collection prefix helper
@@ -313,10 +304,10 @@ datasheet-mcp/
 
 | Symptom | Fix |
 |---|---|
-| ❌ `ds_list()` returns empty | No parts indexed — run the pipeline |
+| ❌ `ds_catalog()` returns empty | No parts indexed — run the pipeline |
 | ❌ `MinerU not found` | `pip install mineru` or use `--backend pymupdf` |
 | ❌ Cannot connect to Qdrant | Check `QDRANT_URL` in `mcp/.env`; ensure Qdrant is running |
-| ⚠️ `ds_search` returns empty on first call | Embedding model is loading (~10 s). Retry. |
+| ⚠️ `ds_query` is slow on first call | The embedding and sparse models are loading; use server prewarm. |
 | ⚠️ 0 registers extracted | Non-standard table headers — prose search still finds the content |
-| ⚠️ `ds_search(content_type="spec")` returns nothing | Section headings weren't classified as spec — try `content_type=""` |
+| ⚠️ `ds_query` reports gaps | Inspect `ds_catalog(part)` coverage and rebuild the evidence corpus. |
 | ❌ Build fails: `No markdown found` | Stage 1 not run — `python tools/pdf_to_md.py --part <P>` first |

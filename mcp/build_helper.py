@@ -28,9 +28,8 @@ os.environ.setdefault("PYTHONIOENCODING", "utf-8")
 
 # Qdrant collection names (same as ds/collections.py)
 _PREFIX = os.environ.get("DS_COLLECTION_PREFIX", "")
-_COLLECTIONS = [f"{_PREFIX}ds_registers", f"{_PREFIX}ds_prose",
-                f"{_PREFIX}ds_pins", f"{_PREFIX}ds_graph",
-                f"{_PREFIX}ds_catalog"]
+_COLLECTIONS = [f"{_PREFIX}ds_catalog",
+                f"{_PREFIX}ds_evidence", f"{_PREFIX}ds_graph"]
 
 
 def _reset_collections() -> None:
@@ -54,8 +53,9 @@ def main() -> None:
     ap.add_argument("--part", required=True, help="Part name, e.g. ADXL345")
     ap.add_argument("--reset", action="store_true",
                     help="Drop all ds_* Qdrant collections first (needed when changing embed model)")
-    ap.add_argument("--no-prose", action="store_true")
-    ap.add_argument("--no-graph", action="store_true")
+    ap.add_argument("--no-prose", action="store_true", help="Deprecated; rejected by evidence build")
+    ap.add_argument("--no-graph", action="store_true", help="Deprecated; rejected by evidence build")
+    ap.add_argument("--no-enrich", action="store_true")
     args = ap.parse_args()
 
     if args.reset:
@@ -63,7 +63,12 @@ def main() -> None:
         _reset_collections()
 
     from ds.ingest.build import build_part
-    build_part(args.part, with_prose=not args.no_prose, with_graph=not args.no_graph)
+    build_part(
+        args.part,
+        with_prose=not args.no_prose,
+        with_graph=not args.no_graph,
+        with_enrichment=not args.no_enrich,
+    )
 
 
 if __name__ == "__main__":

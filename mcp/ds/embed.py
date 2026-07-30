@@ -1,6 +1,6 @@
 """Local, offline embedder — GPU/CPU adaptive.
 
-Default model: BAAI/bge-small-en-v1.5 (384-dim, ~130 MB, CPU-friendly).
+Default model: BAAI/bge-base-en-v1.5 (768-dim).
 Batch size is auto-tuned: 256 on CUDA, 32 on CPU to avoid memory pressure.
 
 Override via env vars (set in mcp/.env):
@@ -15,7 +15,7 @@ from __future__ import annotations
 import os
 from functools import lru_cache
 
-DEFAULT_MODEL = os.environ.get("DS_EMBED_MODEL", "BAAI/bge-small-en-v1.5")
+DEFAULT_MODEL = os.environ.get("DS_EMBED_MODEL", "BAAI/bge-base-en-v1.5")
 _QUERY_PREFIX = os.environ.get(
     "DS_EMBED_QUERY_PREFIX",
     "Represent this sentence for searching relevant passages: ",

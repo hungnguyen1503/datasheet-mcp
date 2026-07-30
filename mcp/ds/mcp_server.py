@@ -1,37 +1,9 @@
-"""Datasheet MCP server — exposes component datasheets to agents as
-token-bounded tools.
+"""Datasheet MCP server — source-linked implementation evidence for agents.
 
-TOOL ROUTING POLICY (read before choosing a tool):
-
-  ds_auto            → USE THIS when unsure which tool to call. Single entry
-                        point that routes internally: register names, procedural
-                        questions, pin assignments, spec lookups, ordering info,
-                        and general queries are all dispatched automatically to
-                        the correct backend.
-
-  ds_search          → DEFAULT for any conceptual / value question:
-                        supply voltage, sensitivity, package, bandwidth, overview,
-                        spec tables, and dependency questions ("what enables X?").
-                        Set content_type="operation" for init/procedure sections,
-                        content_type="spec" for electrical/timing specs,
-                        content_type="order" for ordering/part-number info.
-
-  ds_lookup_register → ONLY when user explicitly names a register symbol OR a
-                        bit/flag. Omit `bit` for full card; supply `bit` for one row.
-
-  ds_find_pin        → ONLY for pin/pad questions:
-                        "which pin is SDA?", "pinout", "CS signal".
-
-  ds_neighbors       → dependency graph around a block or register node.
-
-  ds_list            → ONLY when user explicitly asks for a list:
-                        omit `part` to list all indexed parts;
-                        supply `part` to list that part's functional blocks.
-
-GLOBAL RULES:
-  1. Use exactly ONE tool per query. One call, then stop.
-  2. Do NOT chain ds_search + ds_lookup_register + ds_search(content_type="operation").
-  3. Never call ds_list automatically — only when the user explicitly asks.
+The public surface is deliberately small: ``ds_catalog`` discovers indexed
+parts and coverage, ``ds_query`` assembles an implementation packet, and
+``ds_get`` resolves one exact entity plus graph context.  Every evidence query
+is part-scoped.
 
 Run (stdio):  python mcp/server.py
 Run (HTTP):   DS_TRANSPORT=streamable-http python mcp/server.py
@@ -47,7 +19,7 @@ from mcp.server.auth.provider import TokenVerifier, AccessToken
 from mcp.server.auth.settings import AuthSettings
 from mcp.server.transport_security import TransportSecuritySettings
 
-from .query import DS, _build_footer
+from .evidence.model import CatalogResponse, GetResponse, QueryResponse
 
 _log = logging.getLogger(__name__)
 
@@ -144,212 +116,71 @@ class _PrefixMiddleware:
 
 app.add_middleware(_PrefixMiddleware)
 
-# ── Singleton DS instance ────────────────────────────────────────────────
+# ── Evidence service and public tools ────────────────────────────────────
 
-_ds: DS | None = None
-
-
-def _d() -> DS:
-    global _ds
-    if _ds is None:
-        _ds = DS()
-    return _ds
+_evidence_service = None
 
 
-def _fmt(r) -> str:
-    """Wrap a DSResult with a structured metadata footer for agent self-audit.
+def _service():
+    global _evidence_service
+    if _evidence_service is None:
+        from .evidence.service import DatasheetService
+        _evidence_service = DatasheetService()
+    return _evidence_service
 
-    For plain strings (ds_list), returns the string unchanged.
-    """
-    if not hasattr(r, "kind"):
-        return str(r)
-    return r.text + r.footer
-
-
-# ── Tool 1: catalog listing (merged ds_list_parts + ds_list_blocks) ───────
 
 @mcp.tool()
-def ds_list(part: str = "") -> str:
-    """Catalog lookup — two modes controlled by whether `part` is supplied.
+def ds_catalog(part: str = "", cursor: str = "", limit: int = 200) -> CatalogResponse:
+    """List indexed parts or inspect one part's hierarchy and extraction coverage.
 
-    Mode 1 — part omitted (or ""):
-      Returns all indexed parts with vendor and revision.
-      Call when user asks: "what datasheets are indexed?",
-      "what parts do you have?", "list all parts".
-
-    Mode 2 — part supplied:
-      Returns functional blocks + register counts for that part.
-      Call when user asks: "what blocks does ADXL345 have?",
-      "list ADXL345 sections", "what's in OV7670?".
-
-    Call ONLY when user explicitly asks for a list.
-    Never call automatically before a search or lookup — the part
-    name is always provided by the user in those contexts.
-
-    Args:
-        part: Part name to list blocks for, e.g. "ADXL345".
-              Omit (or pass "") to list all indexed parts.
+    Use without ``part`` only for explicit discovery.  With ``part``, use this
+    before selecting an exact entity when document structure or extraction gaps
+    matter.  ``limit`` is bounded by the service and ``cursor`` continues an
+    outline page.
     """
-    d = _d()
-    if not part:
-        return d.list_parts().text
-    return d.list_blocks(part).text
+    return _service().catalog(part=part, cursor=cursor, limit=limit)
 
-
-# ── Tool 2: register lookup ──────────────────────────────────────────────
 
 @mcp.tool()
-def ds_lookup_register(
-    part: str, register: str, block: str = "", bit: str = "", bits: bool = True
-) -> str:
-    """Look up a register definition or a single bit/flag within a register.
-
-    Use ONLY when the user explicitly names a register symbol or a bit/flag.
-
-    Mode 1 — Full register (bit omitted):
-      Returns addresses + all bit fields for the register.
-      Examples: "explain POWER_CTL", "show FIFO_CTL bits", "DATA_FORMAT register"
-
-    Mode 2 — Single bit (bit supplied):
-      Returns only the one bit/flag row — smallest possible answer.
-      Examples: "what is the MEASURE bit?", "FULL_RES flag", "RANGE field"
-
-    Do NOT use for value/overview questions (→ ds_search), procedures
-    (→ ds_search with content_type="operation"), or pins (→ ds_find_pin).
-
-    Args:
-        part: Part name, e.g. "ADXL345". Required.
-        register: Register symbol, e.g. "POWER_CTL". Required.
-        block: Optional — disambiguates if symbol exists in multiple blocks.
-        bit: Optional — bit symbol/name. Supply to get one bit instead of card.
-        bits: Set False for just the header line. Ignored when bit is set.
-    """
-    d = _d()
-    if bit:
-        return _fmt(d.lookup_bit(part, register, bit))
-    return _fmt(d.lookup_register(part, register, block=block or None, bits=bits))
-
-
-# ── Tool 3: hybrid search + operation + spec + order ─────────────────────
-
-@mcp.tool()
-def ds_search(
+def ds_query(
     part: str,
-    query: str,
-    block: str = "",
-    k: int = 5,
-    max_tokens: int = 1500,
-    content_type: str = "",
-) -> str:
-    """Hybrid semantic + BM25 search with optional content-type filtering.
+    question: str,
+    focus: str = "auto",
+    max_tokens: int = 3000,
+) -> QueryResponse:
+    """Return one source-linked implementation packet for an embedded task.
 
-    Mode 1 — content_type="" (default): All content types.
-      Semantic + BM25 hybrid over all prose + register names.
-      Use for ALL conceptual / value questions:
-        - Electrical: "supply voltage range", "operating current"
-        - Specs: "I2C address", "output data rates", "FIFO modes overview"
-        - Features: "what does the MEASURE bit do", "self-test feature"
-      Results include a "Depends on:" footer when graph edges exist.
-
-    Mode 2 — content_type="operation":
-      Returns initialization / procedure sections in document order.
-      Use for HOW-TO questions:
-        "how to configure FIFO", "startup sequence", "power-up procedure",
-        "enable measurement mode", "SPI initialization steps".
-
-    Mode 3 — content_type="spec":
-      Returns electrical specifications, timing characteristics, ratings.
-      Use for spec/parameter questions:
-        "supply voltage range", "operating current", "timing parameters",
-        "absolute maximum ratings", "DC characteristics".
-
-    Mode 4 — content_type="order":
-      Returns ordering information, part numbers, package codes.
-      Use for ordering/part-number questions:
-        "available part numbers", "package options", "ordering codes",
-        "temperature grades", "how to order".
-
-    This tool is SUFFICIENT on its own for these questions.
-    Do NOT also call ds_lookup_register for the same question.
-
-    Prefer ds_auto over calling this directly.
-
-    Args:
-        part: Part name, e.g. "ADXL345". Required.
-        query: Natural-language question or keywords.
-        block: Optional block filter, e.g. "FIFO".
-        k: Number of prose passages (default 5).
-        max_tokens: Output token budget (default 1500).
-        content_type: "" (all) | "operation" | "spec" | "order".
+    Use for configuration, exact values, timing, modes, commands, and operation
+    flows. ``focus`` may be ``auto``, ``configure``, ``exact``, ``operation``,
+    ``timing``, or ``explain``.  The result explicitly reports normalized MCU
+    settings, ordered steps, evidence, constraints, relations, sources, gaps,
+    conflicts, coverage, confidence, and truncation.
     """
-    d = _d()
-    ct = content_type.strip().lower() if content_type else None
-    if ct == "operation":
-        return _fmt(d.get_operation(part, block or None, max_tokens=max_tokens))
-    if ct == "spec":
-        return _fmt(d.search_spec(part, query, block=block or None, k=k, max_tokens=max_tokens))
-    if ct == "order":
-        return _fmt(d.search_order(part, query, block=block or None, k=k, max_tokens=max_tokens))
-    return _fmt(d.search(part, query, block=block or None, k=k, max_tokens=max_tokens))
+    return _service().query(
+        part=part, question=question, focus=focus, max_tokens=max_tokens)
 
-
-# ── Tool 4: pin finder ───────────────────────────────────────────────────
 
 @mcp.tool()
-def ds_find_pin(part: str, block: str = "", signal: str = "") -> str:
-    """Find pin / pad assignments for a part.
+def ds_get(
+    part: str,
+    target: str,
+    relation_depth: int = 1,
+    cursor: str = "",
+    limit: int = 100,
+) -> GetResponse:
+    """Resolve an exact ds:// ID or symbol and return lossless evidence.
 
-    Use ONLY for pin/pad questions:
-      "which pin is SDA?", "pinout", "package pins", "serial interface pins",
-      "what is the CS pin?", "show all power pins".
-
-    Args:
-        part: Part name, e.g. "ADXL345". Required.
-        block: Optional — narrow to one functional block.
-        signal: Optional — narrow to one signal/pad name, e.g. "SDA".
+    Use for a named register, bitfield, command, mode, operation, table, figure,
+    parameter, or memory region.  Graph traversal is bounded to depth 0-2 and
+    never crosses the requested part.
     """
-    return _fmt(_d().find_pin(part, block=block or None, signal=signal or None))
-
-
-# ── Tool 5: dependency graph ─────────────────────────────────────────────
-
-@mcp.tool()
-def ds_neighbors(part: str, node: str, depth: int = 2) -> str:
-    """Dependency-graph neighborhood around a block or register node.
-
-    Returns prerequisites, registers in a block, bit fields, pins, and prose
-    back-links. Accepts a short name (block or register symbol) or a full
-    "PART/BLOCK/REGISTER" node path.
-
-    Args:
-        part: Part name, e.g. "ADXL345". Required.
-        node: Block name ("FIFO"), register symbol ("POWER_CTL"), or node path.
-        depth: Traversal depth, 1–3 (default 2).
-    """
-    return _fmt(_d().neighbors(part, node, depth=depth))
-
-
-# ── Tool 6: auto-router ──────────────────────────────────────────────────
-
-@mcp.tool()
-def ds_auto(part: str, query: str, block: str = "") -> str:
-    """Single-entry auto-routing tool — use this when unsure which ds tool to call.
-
-    Analyzes `query` and dispatches internally to the most appropriate backend:
-    • Procedural question ("how to configure FIFO") → operation procedure
-    • Pin question ("which pin is SDA") → pin/pad table
-    • Spec question ("supply voltage", "operating current") → spec search
-    • Ordering question ("part number", "package options") → order search
-    • Named register/bit ("POWER_CTL", "MEASURE bit") → exact register card
-    • Everything else → hybrid semantic + BM25 search
-
-    Args:
-        part: Part name (e.g. "ADXL345", "OV7670"). Required.
-        query: Natural-language question, register/bit name, or keyword phrase.
-        block: Optional — narrows scope / resolves the target block for
-               operation and pin routes when it cannot be extracted from the query.
-    """
-    return _fmt(_d().auto(part, query, block=block or None))
+    return _service().get(
+        part=part,
+        target=target,
+        relation_depth=relation_depth,
+        cursor=cursor,
+        limit=limit,
+    )
 
 
 # ── Main ─────────────────────────────────────────────────────────────────
@@ -369,28 +200,12 @@ def _prewarm() -> None:
     Runs before mcp.run(). Each step is wrapped so a failure never
     prevents the server from starting (HUM pattern).
     """
-    # 1. BGE dense embedder (~430 MB, 3-5s on CPU, 0.5s on GPU).
+    # One canonical 768-d embedder and its evidence collections.
     try:
-        d = _d()
-        _ = d.store.embedder   # triggers Embedder init
-        _log.info("prewarm: embedder + register store ready")
+        _service().prewarm()
+        _log.info("prewarm: evidence store ready")
     except Exception as exc:
-        _log.warning("prewarm: embedder failed to load (%s)", exc)
-
-    # 2. Prose index — load synchronously (BM25 sparse model + Qdrant check).
-    try:
-        _ = _d().prose
-        _log.info("prewarm: prose index ready")
-    except Exception as exc:
-        _log.warning("prewarm: prose index failed to load (%s)", exc)
-
-    # 3. Cross-encoder reranker (~24 MB, 1-3s on first load).
-    try:
-        from . import reranker as _rr
-        _rr._load_reranker()
-        _log.info("prewarm: reranker ready")
-    except Exception as exc:
-        _log.warning("prewarm: reranker failed to load (%s)", exc)
+        _log.warning("prewarm: evidence store failed to load (%s)", exc)
 
 
 if __name__ == "__main__":

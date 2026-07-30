@@ -1,0 +1,45 @@
+[
+  {
+    "id": "mx25-spi-mode",
+    "part": "MX25LM51245G",
+    "question": "How to configure SPI mode for flash?",
+    "focus": "configure",
+    "expected_facts": [
+      ["spi mode 0", "mode 0"],
+      ["cpol 0", "cpol=0"],
+      ["cpha 0", "cpha=0"],
+      ["input on the rising edge", "input rising edge"],
+      ["output on the falling edge", "output falling edge"]
+    ]
+  },
+  {
+    "id": "mx25-dummy-frequency",
+    "part": "MX25LM51245G",
+    "question": "How to setup Dummy Cycle and Frequency?",
+    "focus": "timing",
+    "expected_facts": [
+      ["dc[2:0]", "dummy cycle"],
+      ["20", "18", "16", "14"],
+      ["133 mhz", "133mhz"],
+      ["12", "10"],
+      ["104 mhz", "104mhz"],
+      ["8", "84 mhz", "84mhz"],
+      ["6", "66 mhz", "66mhz"]
+    ]
+  },
+  {
+    "id": "mx25-program-erase",
+    "part": "MX25LM51245G",
+    "question": "Program/Erase flow without read array data",
+    "focus": "operation",
+    "expected_facts": [
+      ["write enable", "wren"],
+      ["write enable latch", "wel"],
+      ["write in progress", "wip"],
+      ["read array", "array read"],
+      ["program suspend", "erase suspend", "suspend"],
+      ["resume"],
+      ["program", "erase"]
+    ]
+  }
+]

@@ -5,7 +5,7 @@
 # Usage:
 #   bash build.sh --part ADXL345               index/refresh one part
 #   bash build.sh --part ADXL345 --reset       DROP all ds_* collections then rebuild
-#   bash build.sh --part ADXL345 --no-prose --no-graph   registers + pins only
+#   Prose and graph evidence are mandatory in the canonical index.
 
 set -euo pipefail
 

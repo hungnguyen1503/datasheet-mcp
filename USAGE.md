@@ -11,7 +11,7 @@
 ### API Token
 
 ```
-dcad7617dfd82a4a21c2336b1eaaafe6fb3817f62342122a8cfdd9d7cf9bec81
+<token>
 ```
 
 ### Client config (.mcp.json)
@@ -22,7 +22,7 @@ dcad7617dfd82a4a21c2336b1eaaafe6fb3817f62342122a8cfdd9d7cf9bec81
     "ds": {
       "url": "https://datasheetmcp.hungnguyenjx.space/mcp",
       "headers": {
-        "Authorization": "Bearer dcad7617dfd82a4a21c2336b1eaaafe6fb3817f62342122a8cfdd9d7cf9bec81"
+        "Authorization": "Bearer <token>"
       }
     }
   }
@@ -80,52 +80,27 @@ docker logs ds-cloudflared --tail 20
 
 ## Tools reference
 
-### 1. `ds_list` — Catalog
+### 1. `ds_catalog` — Catalog and coverage
 
 ```
-ds_list()                          # List all indexed parts
-ds_list("ADXL345")                 # List blocks for a part
+ds_catalog()                          # List all indexed parts
+ds_catalog("ADXL345")                # Outline and extraction coverage
 ```
 
-### 2. `ds_search` — Hybrid search
+### 2. `ds_query` — Implementation packet
 
 ```
-ds_search("ADXL345", "FIFO mode overview")
-ds_search("ADXL345", "supply voltage", content_type="spec")
-ds_search("ADXL345", "how to configure FIFO", content_type="operation")
-ds_search("MX25LM51245G", "ordering information", content_type="order")
+ds_query("MX25LM51245G", "How do I configure SPI mode?")
+ds_query("MX25LM51245G", "Set dummy cycles for 133 MHz", focus="timing")
+ds_query("MX25LM51245G", "Program/Erase flow without array reads", focus="operation")
 ```
 
-### 3. `ds_lookup_register` — Register lookup
+### 3. `ds_get` — Exact entity lookup
 
 ```
-ds_lookup_register("ADXL345", "POWER_CTL")              # Full register card
-ds_lookup_register("ADXL345", "POWER_CTL", bit="MEASURE")  # Single bit
-ds_lookup_register("ADXL345", "POWER_CTL", bits=False)   # Header only
-```
-
-### 4. `ds_find_pin` — Pin finder
-
-```
-ds_find_pin("ADXL345")                     # All pins
-ds_find_pin("ADXL345", signal="SDA")       # Specific signal
-ds_find_pin("ADXL345", block="SERIAL")     # Filter by block
-```
-
-### 5. `ds_neighbors` — Dependency graph
-
-```
-ds_neighbors("ADXL345", "FIFO")               # Block neighborhood
-ds_neighbors("ADXL345", "POWER_CTL", depth=1) # Register neighborhood
-```
-
-### 6. `ds_auto` — Auto-router
-
-```
-ds_auto("ADXL345", "how do I configure the FIFO?")
-ds_auto("ADXL345", "which pin is SDA?")
-ds_auto("ADXL345", "what is the supply voltage?")
-ds_auto("ADXL345", "POWER_CTL")
+ds_get("ADXL345", "POWER_CTL")
+ds_get("MX25LM51245G", "DC[2:0]", relation_depth=2)
+ds_get("MX25LM51245G", "ds://MX25LM51245G/.../table/...")
 ```
 
 ---
@@ -185,24 +160,21 @@ bash build.sh --part <PART>
 
 | Collection | Type | Content |
 |---|---|---|
-| `ds_registers` | Dense vector (384-dim) | Register cards with bitfields |
-| `ds_prose` | Dense + sparse BM25 | Heading-scoped prose blocks with content_type |
-| `ds_pins` | Payload-only | Pin/signal descriptions |
-| `ds_graph` | Payload-only | Dependency graph edges |
-| `ds_catalog` | Payload-only | Part metadata (vendor, blocks, revision) |
+| `ds_evidence` | Dense 768-dim + sparse BM25 | Source-linked tables, registers, commands, modes, timing, operations, pins, and constraints |
+| `ds_graph` | Payload-only | Typed evidence relationships |
+| `ds_catalog` | Payload-only | Part metadata, hierarchy, and extraction coverage |
 
 ---
 
-## content_type classification
+## Evidence classification
 
-Prose blocks are auto-classified during ingestion:
+Evidence is classified during ingestion into explicit entity kinds:
 
-| content_type | Heading patterns | Example headings |
-|---|---|---|
-| `operation` | "operation", "initialization", "configuration", "sequence", "start-up", "read/write" | "FIFO Operation", "Power-Up Sequence", "SPI Read Command" |
-| `spec` | "specification", "electrical characteristic", "absolute maximum", "timing", "DC/AC characteristic" | "Electrical Characteristics", "Absolute Maximum Ratings", "AC Timing" |
-| `order` | "ordering", "part number", "package code", "order code", "part marking" | "Ordering Information", "Package Marking", "Part Number Decoder" |
-| `general` | everything else | "Features", "Overview", "Functional Description" |
+| Kinds | Examples |
+|---|---|
+| Structure | document, chapter, section, table, table row, figure |
+| Configuration | register, bitfield, mode, command, pin, memory region |
+| Behavior | operation, step, parameter, constraint, warning, prose |
 
 ---
 
@@ -213,13 +185,13 @@ Prose blocks are auto-classified during ingestion:
 curl -X POST https://datasheetmcp.hungnguyenjx.space/mcp \
   -H "Content-Type: application/json" \
   -H "Accept: application/json, text/event-stream" \
-  -H "Authorization: Bearer dcad7617dfd82a4a21c2336b1eaaafe6fb3817f62342122a8cfdd9d7cf9bec81" \
+  -H "Authorization: Bearer <token>" \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
 
-# Test ds_list
+# Test ds_catalog
 curl -X POST https://datasheetmcp.hungnguyenjx.space/mcp \
   -H "Content-Type: application/json" \
   -H "Accept: application/json, text/event-stream" \
-  -H "Authorization: Bearer dcad7617dfd82a4a21c2336b1eaaafe6fb3817f62342122a8cfdd9d7cf9bec81" \
-  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"ds_list","arguments":{}}}'
+  -H "Authorization: Bearer <token>" \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"ds_catalog","arguments":{}}}'
 ```

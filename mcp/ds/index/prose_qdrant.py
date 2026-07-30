@@ -1,12 +1,12 @@
 """Hybrid prose index backed by Qdrant (dense + sparse BM25, RRF fusion).
 
 Collection : ds_prose
-Vectors    : "dense"  — dim from DS_EMBED_MODEL (default 384 for bge-small-en-v1.5)
+Vectors    : "dense"  — dim from DS_EMBED_MODEL (default 768 for bge-base-en-v1.5)
              "sparse" — BM25 via fastembed Qdrant/bm25
 Distance   : Cosine (dense), inner product (sparse)
 Env vars   : QDRANT_URL      (default http://localhost:6333)
              QDRANT_API_KEY  (optional)
-             DS_EMBED_MODEL  (default BAAI/bge-small-en-v1.5)
+             DS_EMBED_MODEL  (default BAAI/bge-base-en-v1.5)
 
 Quality features
 ----------------

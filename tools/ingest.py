@@ -13,7 +13,7 @@ Usage:
 
     # Pipeline control:
     python tools/ingest.py --no-extract             # skip LLM extraction (use cached JSON)
-    python tools/ingest.py --no-prose --no-graph    # registers + pins only
+    Prose and graph evidence are mandatory in the canonical index.
     python tools/ingest.py --reset                  # drop existing LanceDB tables first
     python tools/ingest.py --backend pymupdf        # force PyMuPDF (no MinerU needed)
 """
@@ -177,8 +177,8 @@ def main() -> None:
                     help=f"MinerU engine (auto: {auto_backend})")
     ap.add_argument("--no-extract", action="store_true",
                     help="Skip LLM extraction if registers.json already exists")
-    ap.add_argument("--no-prose",   action="store_true", help="Skip prose index")
-    ap.add_argument("--no-graph",   action="store_true", help="Skip graph build")
+    ap.add_argument("--no-prose",   action="store_true", help="Deprecated; evidence requires prose")
+    ap.add_argument("--no-graph",   action="store_true", help="Deprecated; evidence requires graph data")
     ap.add_argument("--reset",      action="store_true", help="Drop existing tables before indexing")
     args = ap.parse_args()
 

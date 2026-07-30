@@ -190,6 +190,8 @@ def run_stage(part: str, stage: int, args: argparse.Namespace) -> bool:
             cmd.append("--no-prose")
         if args.no_graph:
             cmd.append("--no-graph")
+        if args.no_enrich:
+            cmd.append("--no-enrich")
         if args.reset:
             cmd.append("--reset")
 
@@ -219,8 +221,10 @@ def main():
                     help="Run only this stage (1-4)")
     ap.add_argument("--index-only", action="store_true", help="Alias for --only 4")
     ap.add_argument("--no-describe", action="store_true", help="Skip VLM figure descriptions")
-    ap.add_argument("--no-prose", action="store_true", help="Skip prose index")
-    ap.add_argument("--no-graph", action="store_true", help="Skip graph build")
+    ap.add_argument("--no-prose", action="store_true", help="Deprecated; evidence requires prose")
+    ap.add_argument("--no-graph", action="store_true", help="Deprecated; evidence requires graph data")
+    ap.add_argument("--no-enrich", action="store_true",
+                    help="Skip optional local semantic enrichment")
     ap.add_argument("--reset", action="store_true", help="Drop Qdrant collections before indexing")
     ap.add_argument("--mineru-backend", default="", choices=["", "hybrid-engine", "pipeline"],
                     help="MinerU backend (default: auto-detect)")

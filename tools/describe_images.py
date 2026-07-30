@@ -7,7 +7,7 @@ and rewrites the reference with alt-text + structured blockquote.
 
 The blockquote prose becomes searchable text in the ds_prose Qdrant collection,
 making datasheet figures (timing diagrams, block diagrams, pinout drawings,
-package dimensions, application circuits) discoverable via ds_search.
+package dimensions, application circuits) discoverable via ds_query.
 
 Backends (auto-detected in order):
   - LM Studio  (http://localhost:1234/v1)
